@@ -97,5 +97,10 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ha-addon/config.yaml
-          git diff --cached --quiet || git commit -m "chore: bump add-on version to ${GITHUB_REF_NAME#v}"
+          if git diff --cached --quiet; then
+            echo "No version change to commit"
+            exit 0
+          fi
+          git commit -m "chore: bump add-on version to ${GITHUB_REF_NAME#v}"
+          git pull --rebase origin main
           git push origin HEAD:main
