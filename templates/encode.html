@@ -243,7 +243,7 @@
 </head>
 <body>
 <header>
-    <a href="/" class="back-link">← MediaStat</a>
+    <a href="{{ ingress_path }}/" class="back-link">← MediaStat</a>
     <span class="page-title">⚙ Encode Jobs</span>
     <div class="hw-status" id="hw-status">detecting…</div>
 </header>
@@ -291,7 +291,7 @@
     <div id="jobs-list"></div>
     <div id="no-jobs" class="no-jobs">
         No encode jobs yet.<br>
-        <a href="/">Start an encode from the media browser →</a>
+        <a href="{{ ingress_path }}/">Start an encode from the media browser →</a>
     </div>
 </main>
 
