@@ -16,11 +16,15 @@ init: false
 
 # Options exposed in the HA add-on UI
 options:
-  media_path: "/media"
+  directories:
+    - label: Media
+      path: /media
   log_level: "info"
 
 schema:
-  media_path: str
+  directories:
+    - label: str
+      path: str
   log_level: list(debug|info|warning|error)
 
 # Port used when not using ingress

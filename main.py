@@ -59,13 +59,13 @@ CONFIGURED_DIRS: list[dict] = [
     if d.get("path")
 ]
 
-# ALLOWED_ROOTS: derived from config directories (plus legacy env var)
+# ALLOWED_ROOTS: derived from config directories (plus legacy env var + DEFAULT_ROOT)
 _allowed_roots_env = os.environ.get("ALLOWED_ROOTS", "")
 ALLOWED_ROOTS = [
     Path(r).expanduser().resolve()
     for r in _allowed_roots_env.split("|")
     if r
-] + [Path(d["path"]).resolve() for d in CONFIGURED_DIRS]
+] + [Path(d["path"]).resolve() for d in CONFIGURED_DIRS] + [DEFAULT_ROOT.resolve()]
 
 # Active scan root — loaded from DB on startup, changeable at runtime
 current_root: Path = DEFAULT_ROOT

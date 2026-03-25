@@ -3,40 +3,29 @@
 # MediaStat — Home Assistant add-on entrypoint
 
 # ── Read options from HA UI ───────────────────────────────────────────────────
-MEDIA_PATH=$(bashio::config 'media_path')
 LOG_LEVEL=$(bashio::config 'log_level')
-
-# Fall back to /media (the standard HA media directory) if not set
-MEDIA_PATH="${MEDIA_PATH:-/media}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
 bashio::log.info "MediaStat starting"
-bashio::log.info "Media path : ${MEDIA_PATH}"
 bashio::log.info "Log level  : ${LOG_LEVEL}"
 
-# ── Bootstrap /data/config.yaml if it doesn't exist yet ─────────────────────
+# ── Write /data/config.yaml from HA options on every start ───────────────────
+# This keeps the app config in sync with whatever the user set in the HA UI.
 CONFIG_FILE="/data/config.yaml"
-if [ ! -f "${CONFIG_FILE}" ]; then
-    bashio::log.info "Creating default ${CONFIG_FILE}"
-    cat > "${CONFIG_FILE}" <<EOF
-# MediaStat directory configuration
-# Add or remove entries to customise your library.
-# Paths must be accessible inside the container.
-# The HA media directory is mounted at /media.
-# The HA share directory is mounted at /share (read-only).
-#
-# Example:
-# directories:
-#   - label: Movies
-#     path: /media/movies
-#   - label: TV Shows
-#     path: /media/tv
+bashio::log.info "Writing ${CONFIG_FILE} from add-on options"
 
-directories:
-  - label: Media
-    path: ${MEDIA_PATH}
-EOF
-fi
+printf 'directories:\n' > "${CONFIG_FILE}"
+DIR_COUNT=$(bashio::config 'directories | length')
+for i in $(seq 0 $((DIR_COUNT - 1))); do
+    LABEL=$(bashio::config "directories[${i}].label")
+    PATH_VAL=$(bashio::config "directories[${i}].path")
+    bashio::log.info "  Directory: ${LABEL} → ${PATH_VAL}"
+    printf '  - label: "%s"\n    path: "%s"\n' "${LABEL}" "${PATH_VAL}" >> "${CONFIG_FILE}"
+done
+
+# Use the first directory's path as MEDIA_ROOT (the app's default browse root)
+MEDIA_ROOT_VAL=$(bashio::config 'directories[0].path')
+MEDIA_ROOT_VAL="${MEDIA_ROOT_VAL:-/media}"
 
 # ── GPU / hardware acceleration setup ────────────────────────────────────────
 # Intel QSV and AMD VA-API both expose render nodes under /dev/dri.
@@ -71,7 +60,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # ── Environment variables for the app ────────────────────────────────────────
-export MEDIA_ROOT="${MEDIA_PATH}"
+export MEDIA_ROOT="${MEDIA_ROOT_VAL}"
 export DB_PATH="/data/mediastat.db"
 export CONFIG_PATH="${CONFIG_FILE}"
 
