@@ -22,8 +22,7 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 ADDON_DIR="$(cd "$(dirname "$0")/ha-addon" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Override with: IMAGE=ghcr.io/youruser/mediastat-addon ./build.sh --push
-IMAGE="${IMAGE:-local/mediastat-addon}"
+IMAGE="${IMAGE:-ghcr.io/mplinuxgeek/mediastat-addon}"
 VERSION="$(grep '^version:' "${ADDON_DIR}/config.yaml" | awk '{print $2}' | tr -d '"')"
 
 # Architectures → HA base image mapping (from build.yaml)
