@@ -1025,7 +1025,7 @@ def _build_encode_cmd(
         "HandBrakeCLI", "-i", input_path, "-o", output_path,
         "--encoder", encoder, "--encoder-preset", preset,
         "--quality", str(qp),
-        "--aencoder", "copy",
+        "--aencoder", "copy:aac",
         "--audio-lang-list", audio_lang_list, "--all-audio",
         "--subtitle-lang-list", lang, "--all-subtitles",
     ]
@@ -1127,9 +1127,13 @@ async def _run_encode_job(job_id: str) -> None:
         )
         job._proc = proc
 
+        stderr_lines: list[str] = []
+
         async def _drain_stderr():
-            async for _ in proc.stderr:
-                pass  # consume to prevent pipe buffer deadlock
+            async for raw in proc.stderr:
+                line = raw.decode(errors="replace").rstrip()
+                if line:
+                    stderr_lines.append(line)
 
         stderr_task = asyncio.create_task(_drain_stderr())
         last_notify = 0.0
@@ -1176,7 +1180,14 @@ async def _run_encode_job(job_id: str) -> None:
                     pass
             else:
                 job.status = "failed"
-                job.error = f"HandBrakeCLI exited with code {proc.returncode}"
+                # Find the most useful error line from stderr
+                err_lines = [l for l in stderr_lines if any(
+                    kw in l.lower() for kw in ("error", "failed", "invalid", "cannot", "unable")
+                )]
+                detail = (err_lines[-1] if err_lines else stderr_lines[-1]) if stderr_lines else ""
+                job.error = f"HandBrakeCLI exited with code {proc.returncode}" + (f": {detail}" if detail else "")
+                if stderr_lines:
+                    log.error("Encode %s stderr tail:\n%s", job_id[:8], "\n".join(stderr_lines[-20:]))
 
     except asyncio.CancelledError:
         job.status = "cancelled"
