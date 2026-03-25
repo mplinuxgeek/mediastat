@@ -1152,22 +1152,23 @@
     // ── Ingress shim ─────────────────────────────────────────────
     // When running behind HA ingress all absolute paths must be prefixed.
     if (BASE_PATH) {
-        // Patch fetch
+        // Patch fetch — skip URLs already prefixed (e.g. HTMX calling fetch after configRequest)
         const _fetch = window.fetch;
         window.fetch = (url, opts) => {
-            if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+            if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
             return _fetch(url, opts);
         };
         // Patch EventSource
         const _ES = window.EventSource;
         window.EventSource = function(url, cfg) {
-            if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+            if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
             return new _ES(url, cfg);
         };
         Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
-        // Patch HTMX requests
+        // Patch HTMX requests (sets path before fetch is called, so fetch guard above prevents double-prefix)
         document.addEventListener('htmx:configRequest', evt => {
-            if (evt.detail.path.startsWith('/')) evt.detail.path = BASE_PATH + evt.detail.path;
+            if (evt.detail.path.startsWith('/') && !evt.detail.path.startsWith(BASE_PATH))
+                evt.detail.path = BASE_PATH + evt.detail.path;
         });
     }
 
