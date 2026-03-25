@@ -603,6 +603,48 @@
             transition: color 0.1s;
         }
         .player-close:hover { color: var(--text); }
+
+        /* ── Media info modal ────────────────────────────────────── */
+        .mediainfo-inner { max-width: 640px; width: 96vw; }
+        .mediainfo-body {
+            padding: 16px 20px 20px;
+            overflow-y: auto;
+            max-height: calc(90vh - 44px);
+            font-size: 13px;
+        }
+        .mi-section { margin-bottom: 16px; }
+        .mi-section:last-child { margin-bottom: 0; }
+        .mi-section-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+            margin-bottom: 6px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .mi-grid {
+            display: grid;
+            grid-template-columns: 140px 1fr;
+            gap: 3px 10px;
+        }
+        .mi-key   { color: var(--muted); white-space: nowrap; }
+        .mi-val   { color: var(--text);  word-break: break-all; }
+        .mi-track-sep { margin: 8px 0 6px; border: none; border-top: 1px dashed var(--border); }
+        .mi-badge {
+            display: inline-block;
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--surface2);
+            color: var(--muted);
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+        .mi-badge.hdr { color: #e3b341; border-color: #614a14; background: rgba(227,179,65,0.08); }
+
         #player-video {
             width: 100%;
             max-height: calc(95vh - 44px);
@@ -910,6 +952,16 @@
           hx-swap="innerHTML">
         <div class="root-loading">Loading media library…</div>
     </main>
+
+    <div id="mediainfo-modal" class="player-overlay" style="display:none" onclick="if(event.target===this)closeMediaInfo()">
+        <div class="player-inner mediainfo-inner">
+            <div class="player-header">
+                <span id="mediainfo-title" class="player-title"></span>
+                <button class="player-close" onclick="closeMediaInfo()">✕</button>
+            </div>
+            <div id="mediainfo-body" class="mediainfo-body">Loading…</div>
+        </div>
+    </div>
 
     <div id="player-modal" class="player-overlay" style="display:none" onclick="if(event.target===this)closePlayer()">
         <div class="player-inner">
@@ -1984,11 +2036,78 @@
     }
     // ── File name: click copies ───────────────────────────────────
     function handleFileClick(stemEl) {
-        const stem = stemEl.closest('.file-entry').dataset.path.split('/').pop().replace(/\.[^.]+$/, '');
-        navigator.clipboard.writeText(stem).then(() => {
-            stemEl.classList.add('name-copied');
-            setTimeout(() => stemEl.classList.remove('name-copied'), 700);
-        }).catch(() => {});
+        openMediaInfo(stemEl.closest('.file-entry').dataset.path);
+    }
+
+    // ── Media info modal ──────────────────────────────────────────
+    function openMediaInfo(path) {
+        document.getElementById('mediainfo-title').textContent = path.split('/').pop();
+        const body = document.getElementById('mediainfo-body');
+        body.innerHTML = 'Loading…';
+        document.getElementById('mediainfo-modal').style.display = 'flex';
+        fetch('/file-info?path=' + encodeURIComponent(path))
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(d => { body.innerHTML = renderMediaInfo(d); })
+            .catch(e => { body.innerHTML = '<span style="color:var(--red)">Error: ' + escHtml(e.message) + '</span>'; });
+    }
+
+    function closeMediaInfo() {
+        document.getElementById('mediainfo-modal').style.display = 'none';
+    }
+
+    function renderMediaInfo(d) {
+        const kv = (k, v) => v != null && v !== '' && v !== 0
+            ? `<span class="mi-key">${k}</span><span class="mi-val">${escHtml(String(v))}</span>`
+            : '';
+        const sec = (title, rows) => rows
+            ? `<div class="mi-section"><div class="mi-section-title">${title}</div><div class="mi-grid">${rows}</div></div>`
+            : '';
+        const fmtBr  = br => br > 0 ? (br > 1e6 ? (br/1e6).toFixed(1)+' Mbps' : Math.round(br/1e3)+' kbps') : '';
+        const fmtHz  = hz => hz > 0 ? (hz/1000).toFixed(1)+' kHz' : '';
+        const fmtSz  = b  => { if(!b) return ''; const u=['B','KB','MB','GB']; let i=0; while(b>=1024&&i<3){b/=1024;i++;} return b.toFixed(i?1:0)+' '+u[i]; };
+        const fmtDur = s  => { s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return h ? `${h}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}` : `${m}:${String(ss).padStart(2,'0')}`; };
+        const chName = (n, layout) => layout || (n === 1 ? 'mono' : n === 2 ? 'stereo' : n === 6 ? '5.1' : n === 8 ? '7.1' : n + 'ch');
+
+        const fmtRows = [
+            kv('Format',   d.format),
+            kv('Size',     fmtSz(d.size)),
+            kv('Duration', d.duration > 0 ? fmtDur(d.duration) : ''),
+            kv('Bitrate',  fmtBr(d.bitrate)),
+        ].filter(Boolean).join('');
+
+        const videoSecs = (d.video || []).map((v, i) => {
+            const hdrBadge = v.hdr ? '<span class="mi-badge hdr">HDR</span>' : '';
+            const res = v.width && v.height ? `${v.width}×${v.height}` : '';
+            const rows = [
+                kv('Codec',       v.codec + (v.profile ? ' / '+v.profile : '') + hdrBadge),
+                kv('Resolution',  res),
+                kv('Frame rate',  v.fps > 0 ? v.fps+' fps' : ''),
+                kv('Pixel format',v.pix_fmt),
+                kv('Bitrate',     fmtBr(v.bitrate)),
+                kv('Color space', v.color_space),
+                kv('Language',    v.lang),
+            ].filter(Boolean).join('');
+            return sec((d.video.length > 1 ? `Video Track ${i+1}` : 'Video'), rows);
+        }).join('');
+
+        const audioSecs = (d.audio || []).map((a, i) => {
+            const rows = [
+                kv('Codec',    a.codec),
+                kv('Channels', chName(a.channels, a.channel_layout)),
+                kv('Sample rate', fmtHz(a.sample_rate)),
+                kv('Bitrate',  fmtBr(a.bitrate)),
+                kv('Language', a.lang),
+                kv('Title',    a.title),
+            ].filter(Boolean).join('');
+            return sec((d.audio.length > 1 ? `Audio Track ${i+1}` : 'Audio'), rows);
+        }).join('');
+
+        const subRows = (d.subtitle || []).map((s, i) =>
+            `<span class="mi-key">Track ${i+1}</span><span class="mi-val">${escHtml(s.codec)}${s.lang ? ' · '+escHtml(s.lang) : ''}${s.title ? ' · '+escHtml(s.title) : ''}</span>`
+        ).join('');
+        const subSec = subRows ? sec('Subtitles', subRows) : '';
+
+        return sec('File', fmtRows) + videoSecs + audioSecs + subSec;
     }
 
     // ── Video player ─────────────────────────────────────────────
@@ -2148,7 +2267,7 @@
     });
 
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') { closeDeleteModal(); closeRenameModal(); closePlayer(); closeSearchSettings(); closeSearchMenu(); }
+        if (e.key === 'Escape') { closeDeleteModal(); closeRenameModal(); closePlayer(); closeMediaInfo(); closeSearchSettings(); closeSearchMenu(); }
     });
 
     // ── Search sites ─────────────────────────────────────────────

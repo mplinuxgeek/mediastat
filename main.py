@@ -746,6 +746,93 @@ async def rename_file(request: Request, path: str = Query(...), new_name: str = 
     return {"path": str(new_path), "name": new_path.name}
 
 
+@app.get("/file-info")
+async def file_info(path: str = Query(...)):
+    """Return detailed ffprobe info for a single file."""
+    file_path = safe_path(path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404)
+    async with _PROBE_SEM:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_streams", "-show_format",
+            "-print_format", "json",
+            str(file_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise HTTPException(status_code=504, detail="ffprobe timed out")
+    try:
+        data = json.loads(stdout)
+    except Exception:
+        raise HTTPException(status_code=500, detail="ffprobe parse error")
+
+    fmt = data.get("format", {})
+    streams = data.get("streams", [])
+
+    def _tag(s, *keys):
+        tags = s.get("tags") or {}
+        for k in keys:
+            v = tags.get(k) or tags.get(k.upper())
+            if v:
+                return v
+        return None
+
+    result = {
+        "path":     str(file_path),
+        "name":     file_path.name,
+        "size":     file_path.stat().st_size,
+        "format":   fmt.get("format_long_name") or fmt.get("format_name", ""),
+        "duration": float(fmt.get("duration") or 0),
+        "bitrate":  int(fmt.get("bit_rate") or 0),
+        "video": [],
+        "audio": [],
+        "subtitle": [],
+    }
+    for s in streams:
+        stype = s.get("codec_type")
+        lang  = _tag(s, "language") or ""
+        title = _tag(s, "title") or ""
+        if stype == "video":
+            fr_num, fr_den = (s.get("r_frame_rate") or "0/1").split("/")
+            fps = round(int(fr_num) / max(int(fr_den), 1), 3)
+            result["video"].append({
+                "codec":     s.get("codec_name", ""),
+                "profile":   s.get("profile", ""),
+                "width":     s.get("width"),
+                "height":    s.get("height"),
+                "pix_fmt":   s.get("pix_fmt", ""),
+                "fps":       fps,
+                "bitrate":   int(s.get("bit_rate") or 0),
+                "hdr":       "bt2020" in (s.get("color_space") or "") or "smpte2084" in (s.get("color_transfer") or ""),
+                "color_space": s.get("color_space", ""),
+                "lang":      lang,
+                "title":     title,
+            })
+        elif stype == "audio":
+            result["audio"].append({
+                "codec":      s.get("codec_name", ""),
+                "channels":   s.get("channels", 0),
+                "channel_layout": s.get("channel_layout", ""),
+                "sample_rate": int(s.get("sample_rate") or 0),
+                "bitrate":    int(s.get("bit_rate") or 0),
+                "lang":       lang,
+                "title":      title,
+            })
+        elif stype == "subtitle":
+            result["subtitle"].append({
+                "codec": s.get("codec_name", ""),
+                "lang":  lang,
+                "title": title,
+            })
+    return result
+
+
 @app.delete("/file")
 async def delete_file(request: Request, path: str = Query(...)):
     if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
