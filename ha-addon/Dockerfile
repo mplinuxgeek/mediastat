@@ -1,39 +1,28 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 FROM ${BUILD_FROM}
 
-# Install system dependencies
+# The HA base image only has 'main' in its apt sources.
+# non-free-firmware is required for intel-media-va-driver-non-free (QSV/VA-API).
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources
+
+# Install system dependencies + HandBrakeCLI.
+# The standard Debian handbrake-cli has QSV compiled in; it just needs the
+# Intel VA-API driver (non-free-firmware) present at runtime to use it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
         ffmpeg \
+        handbrake-cli \
         vainfo \
         libva-drm2 \
         libvpl2 \
-        util-linux \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install HandBrakeCLI from deb-multimedia.org — their build is compiled with
-# libvpl2 (Intel oneVPL) so QSV hardware encoding works, unlike the official
-# Debian package which is built without hardware encoder support.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && curl -fsSL https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb \
-        -o /tmp/dmm-keyring.deb \
-    && dpkg -i /tmp/dmm-keyring.deb && rm /tmp/dmm-keyring.deb \
-    && echo "deb https://www.deb-multimedia.org bookworm main" \
-        > /etc/apt/sources.list.d/deb-multimedia.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends handbrake-cli \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install VA-API drivers (Intel/AMD)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
         intel-media-va-driver-non-free \
         i965-va-driver-shaders \
         mesa-va-drivers \
-    ; apt-get clean && rm -rf /var/lib/apt/lists/* ; true
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 # Ensure the standard DRM groups exist so run.sh can add the process to them
 RUN groupadd -f -g 44 video 2>/dev/null || true \
