@@ -19,17 +19,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install official HandBrake CLI binary (includes QSV/NVENC/VCE support).
-# If HB_VERSION is empty, resolve the latest release tag from GitHub API.
+# Resolves the download URL from the GitHub releases API asset list so the
+# filename pattern doesn't need to be hardcoded (it changed across releases).
 RUN HB_VER="${HB_VERSION}" ; \
     if [ -z "${HB_VER}" ]; then \
         HB_VER="$(curl -fsSL https://api.github.com/repos/HandBrake/HandBrake/releases/latest \
-            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"; \
-        echo "Resolved HandBrake latest release: ${HB_VER}"; \
+            | grep '"tag_name"' | head -1 \
+            | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"; \
     fi \
-    && curl -fsSL \
-        "https://github.com/HandBrake/HandBrake/releases/download/${HB_VER}/HandBrakeCLI-${HB_VER}-x86_64.tar.bz2" \
-        -o /tmp/hb.tar.bz2 \
-    && tar -xjf /tmp/hb.tar.bz2 -C /usr/local/bin HandBrakeCLI \
+    && echo "Installing HandBrake ${HB_VER}" \
+    && HB_URL="$(curl -fsSL "https://api.github.com/repos/HandBrake/HandBrake/releases/tags/${HB_VER}" \
+        | grep '"browser_download_url"' \
+        | grep -i 'HandBrakeCLI.*x86_64.*\.tar\.bz2' \
+        | head -1 \
+        | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')" \
+    && echo "Download URL: ${HB_URL}" \
+    && curl -fsSL "${HB_URL}" -o /tmp/hb.tar.bz2 \
+    && tar -xjf /tmp/hb.tar.bz2 --wildcards --no-anchored 'HandBrakeCLI' \
+        --transform 's|.*/||' -C /usr/local/bin \
     && chmod +x /usr/local/bin/HandBrakeCLI \
     && rm /tmp/hb.tar.bz2
 
