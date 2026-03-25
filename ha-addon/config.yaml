@@ -3,11 +3,10 @@ name: "MediaStat"
 version: "1.0.0"
 slug: "mediastat"
 description: "Media browser, health checker and HandBrake transcoder for your library"
-url: "https://github.com/youruser/mediastat"
+url: "https://github.com/mplinuxgeek/mediastat"
 # When image is set, HA pulls this instead of building from the Dockerfile.
-# Replace 'youruser' with your GitHub username. The {arch} token is substituted
-# by the supervisor (e.g. amd64, aarch64, armv7).
-image: "ghcr.io/youruser/mediastat-addon-{arch}"
+# The {arch} token is substituted by the supervisor (e.g. amd64, aarch64, armv7).
+image: "ghcr.io/mplinuxgeek/mediastat-addon-{arch}"
 arch:
   - amd64
   - aarch64
