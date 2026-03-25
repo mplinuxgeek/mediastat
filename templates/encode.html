@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Encode Jobs — MediaStat</title>
+    <style>
+        :root {
+            --bg:       #0d1117;
+            --surface:  #161b22;
+            --surface2: #1c2128;
+            --border:   #30363d;
+            --text:     #e6edf3;
+            --muted:    #7d8590;
+            --accent:   #58a6ff;
+            --green:    #3fb950;
+            --yellow:   #d29922;
+            --red:      #f47474;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+        header {
+            position: sticky; top: 0; z-index: 10;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 20px;
+            display: flex; align-items: center; gap: 16px;
+        }
+        .back-link {
+            color: var(--muted); text-decoration: none; font-size: 13px;
+            transition: color 0.1s;
+        }
+        .back-link:hover { color: var(--accent); }
+        .page-title { color: var(--text); font-size: 15px; font-weight: 600; }
+        .hw-status {
+            margin-left: auto; font-size: 12px; color: var(--muted);
+            display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+        }
+        .hw-chip {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 2px 8px; border-radius: 4px;
+            border: 1px solid var(--border); font-size: 11px;
+        }
+        .hw-chip.ok   { color: var(--green);  border-color: #1e4d27; background: rgba(63,185,80,0.06); }
+        .hw-chip.warn { color: var(--muted);  border-color: var(--border); }
+        .hw-chip.err  { color: var(--red);    border-color: #7d2020; background: rgba(244,116,116,0.06); }
+
+        main { padding: 20px; max-width: 900px; }
+
+        .no-jobs {
+            color: var(--muted); font-size: 13px; padding: 40px 0;
+            text-align: center;
+        }
+        .no-jobs a { color: var(--accent); text-decoration: none; }
+        .no-jobs a:hover { text-decoration: underline; }
+
+        .job-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            transition: border-color 0.15s;
+        }
+        .job-card.running { border-color: #1f3a5c; }
+        .job-card.done    { border-color: #1a3a24; }
+        .job-card.failed  { border-color: #4a1f1f; }
+
+        .job-header {
+            display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+        }
+        .job-badge {
+            font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+            padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+            text-transform: uppercase;
+        }
+        .badge-queued    { background: var(--surface2); color: var(--muted); }
+        .badge-running   { background: #1a2f4a; color: var(--accent); }
+        .badge-done      { background: #1a3a24; color: var(--green); }
+        .badge-failed    { background: #3a1a1a; color: var(--red); }
+        .badge-cancelled { background: var(--surface2); color: var(--muted); }
+
+        .job-name { flex: 1; font-size: 13px; min-width: 0; overflow: hidden; }
+        .job-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .job-name .input-name { color: var(--muted); font-size: 11px; margin-top: 1px; }
+
+        .job-action-btn {
+            background: transparent; border: 1px solid var(--border);
+            color: var(--muted); cursor: pointer; font-family: inherit;
+            font-size: 12px; padding: 3px 10px; border-radius: 4px;
+            flex-shrink: 0; transition: border-color 0.1s, color 0.1s;
+        }
+        .job-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .job-action-btn.cancel:hover { border-color: var(--red); color: var(--red); }
+        .job-action-btn.retry { color: var(--green); border-color: #1e4d27; }
+        .job-action-btn.retry:hover { background: rgba(63,185,80,0.08); border-color: var(--green); }
+        .job-action-btn.move  { color: #e3b341; border-color: #4a3900; }
+        .job-action-btn.move:hover  { background: rgba(227,179,65,0.08); border-color: #e3b341; }
+        .job-action-btn.move.armed  { color: var(--red); border-color: var(--red); background: rgba(248,81,73,0.08); }
+        .job-action-btn.moved-done  { color: var(--muted); border-color: var(--border); cursor: default; }
+
+        .job-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+        .job-meta span { margin-right: 12px; }
+        .job-mediainfo {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 11px; margin-bottom: 10px;
+        }
+        .mi-src    { color: var(--muted); }
+        .mi-arrow  { color: var(--border); }
+        .mi-tgt    { color: var(--accent); }
+        .mi-streams { color: var(--muted); margin-left: 8px; }
+
+        .job-bar-row {
+            display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+        }
+        .job-bar {
+            flex: 1; height: 6px; background: var(--surface2);
+            border-radius: 3px; overflow: hidden;
+        }
+        .job-bar-fill {
+            height: 100%; border-radius: 3px;
+            transition: width 0.4s ease;
+            background: var(--accent);
+        }
+        .job-bar-fill.done   { background: var(--green); }
+        .job-bar-fill.failed { background: var(--red); }
+        .job-pct { font-size: 12px; color: var(--muted); width: 44px; text-align: right; flex-shrink: 0; }
+
+        .job-stats { font-size: 12px; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
+        .job-stats .stat-val { color: var(--text); }
+        .job-stats .stat-green { color: var(--green); }
+        .job-stats .stat-red   { color: var(--red); }
+
+        .job-error { font-size: 12px; color: var(--red); margin-top: 6px; }
+
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+        .badge-running { animation: pulse 2s ease-in-out infinite; }
+
+        /* ── System info panel ── */
+        .sysinfo {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+        .sysinfo summary {
+            list-style: none;
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 14px;
+            cursor: pointer;
+            font-size: 12px; color: var(--muted);
+            user-select: none;
+            background: var(--surface);
+        }
+        .sysinfo summary::-webkit-details-marker { display: none; }
+        .sysinfo summary:hover { color: var(--text); }
+        .sysinfo summary .si-chevron {
+            font-size: 9px; display: inline-block;
+            transition: transform 0.15s;
+        }
+        .sysinfo[open] summary .si-chevron { transform: rotate(90deg); }
+        .sysinfo-body {
+            padding: 14px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .si-section { margin-bottom: 14px; }
+        .si-section:last-child { margin-bottom: 0; }
+        .si-heading {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+            color: var(--border); margin-bottom: 8px;
+        }
+        .si-row {
+            display: flex; align-items: center; gap: 10px;
+            font-size: 12px; margin-bottom: 5px;
+        }
+        .si-row:last-child { margin-bottom: 0; }
+        .si-label { color: var(--muted); width: 140px; flex-shrink: 0; }
+        .si-val   { color: var(--text); }
+        .si-ok    { color: var(--green); }
+        .si-warn  { color: var(--muted); }
+        .si-err   { color: var(--red); }
+        .si-note  { font-size: 11px; color: var(--muted); margin-left: 6px; }
+        .si-loading { color: var(--muted); font-size: 12px; font-style: italic; }
+
+        /* ── Stats bar ── */
+        .stats-bar {
+            display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
+            padding: 10px 14px; margin-bottom: 16px;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 8px; font-size: 12px; color: var(--muted);
+        }
+        .stats-bar .sv { color: var(--text); font-weight: 500; margin-left: 4px; }
+        .stats-bar .sv.green { color: var(--green); }
+
+        /* ── Schedule panel ── */
+        .schedule-panel {
+            border: 1px solid var(--border); border-radius: 8px;
+            margin-bottom: 16px; overflow: hidden;
+        }
+        .schedule-panel summary {
+            list-style: none; display: flex; align-items: center; gap: 8px;
+            padding: 10px 14px; cursor: pointer; font-size: 12px; color: var(--muted);
+            user-select: none; background: var(--surface);
+        }
+        .schedule-panel summary::-webkit-details-marker { display: none; }
+        .schedule-panel summary:hover { color: var(--text); }
+        .schedule-panel .si-chevron { font-size: 9px; display: inline-block; transition: transform 0.15s; }
+        .schedule-panel[open] summary .si-chevron { transform: rotate(90deg); }
+        .schedule-body {
+            padding: 14px 16px; border-top: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .schedule-row {
+            display: flex; align-items: center; gap: 12px; font-size: 13px;
+            margin-bottom: 10px;
+        }
+        .schedule-row:last-child { margin-bottom: 0; }
+        .schedule-label { color: var(--muted); width: 120px; flex-shrink: 0; }
+        .schedule-input {
+            background: var(--bg); border: 1px solid var(--border); color: var(--text);
+            padding: 3px 8px; border-radius: 4px; font-family: inherit; font-size: 13px;
+            width: 80px; outline: none;
+        }
+        .schedule-input:focus { border-color: var(--accent); }
+        .schedule-status { font-size: 12px; color: var(--muted); margin-left: auto; }
+        .schedule-status.active { color: var(--green); }
+        .schedule-status.waiting { color: var(--yellow); }
+
+        /* ── Reorder buttons ── */
+        .job-action-btn.reorder {
+            padding: 3px 6px; font-size: 11px;
+        }
+        .job-action-btn.reorder:disabled { opacity: 0.25; cursor: default; border-color: transparent; }
+    </style>
+</head>
+<body>
+<header>
+    <a href="/" class="back-link">← MediaStat</a>
+    <span class="page-title">⚙ Encode Jobs</span>
+    <div class="hw-status" id="hw-status">detecting…</div>
+</header>
+<main>
+    <div id="stats-bar" class="stats-bar" style="display:none"></div>
+
+    <details class="schedule-panel" id="schedule-panel">
+        <summary>
+            <span class="si-chevron">&#9654;</span>
+            Encode Schedule
+            <span id="schedule-summary-status" style="margin-left:6px;font-size:11px"></span>
+        </summary>
+        <div class="schedule-body">
+            <div class="schedule-row">
+                <span class="schedule-label">Enable schedule</span>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+                    <input type="checkbox" id="sched-enabled" style="accent-color:var(--accent)" onchange="saveSchedule()">
+                    Only encode during specified hours
+                </label>
+            </div>
+            <div class="schedule-row">
+                <span class="schedule-label">Start hour</span>
+                <input type="number" id="sched-start" class="schedule-input" min="0" max="23" value="22" onchange="saveSchedule()">
+                <span style="color:var(--muted);font-size:12px">to</span>
+                <input type="number" id="sched-end" class="schedule-input" min="0" max="23" value="6" onchange="saveSchedule()">
+                <span id="sched-active-status" class="schedule-status"></span>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">
+                Hours in 24h format. Overnight ranges supported (e.g. 22:00–06:00).
+                The worker checks every 60 s when outside the window.
+            </div>
+        </div>
+    </details>
+
+    <details class="sysinfo" id="sysinfo-panel" ontoggle="onSysinfoToggle(this)">
+        <summary>
+            <span class="si-chevron">&#9654;</span>
+            System Info
+        </summary>
+        <div class="sysinfo-body" id="sysinfo-body">
+            <span class="si-loading">Loading…</span>
+        </div>
+    </details>
+
+    <div id="jobs-list"></div>
+    <div id="no-jobs" class="no-jobs">
+        No encode jobs yet.<br>
+        <a href="/">Start an encode from the media browser →</a>
+    </div>
+</main>
+
+<script>
+const DELETE_TOKEN = "{{ delete_token }}";
+let _jobs = {};  // id → job dict
+
+// ── SSE connection ────────────────────────────────────────────────────────────
+function connectSSE() {
+    const es = new EventSource('/encode/events');
+    es.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'ping') return;
+        if (msg.type === 'init') {
+            _jobs = {};
+            msg.jobs.forEach(j => _jobs[j.id] = j);
+            renderHW(msg.hw || {});
+            if (msg.schedule) applyScheduleConfig(msg.schedule);
+            renderAll();
+            loadStats();
+        } else if (msg.type === 'update') {
+            _jobs[msg.job.id] = msg.job;
+            renderJob(msg.job.id);
+            updateNoJobs();
+        } else if (msg.type === 'remove') {
+            delete _jobs[msg.job_id];
+            const el = document.getElementById('job-' + msg.job_id);
+            if (el) el.remove();
+            updateNoJobs();
+            loadStats();
+        } else if (msg.type === 'queue_order') {
+            // Update queue_pos for all queued jobs and re-render them
+            const order = msg.order || [];
+            order.forEach((id, pos) => {
+                if (_jobs[id]) { _jobs[id].queue_pos = pos; renderJob(id); }
+            });
+            // Also re-render jobs that fell off the queue (queue_pos → -1)
+            Object.values(_jobs).forEach(j => {
+                if (j.status === 'queued' && !order.includes(j.id)) {
+                    j.queue_pos = -1; renderJob(j.id);
+                }
+            });
+        }
+    };
+    es.onerror = () => setTimeout(connectSSE, 3000);
+}
+
+// ── Hardware status ───────────────────────────────────────────────────────────
+function renderHW(hw) {
+    const chips = [];
+    const chip = (label, ok, warn) => {
+        const cls = ok ? 'ok' : (warn ? 'warn' : 'err');
+        const icon = ok ? '✓' : '✗';
+        chips.push(`<span class="hw-chip ${cls}">${icon} ${label}</span>`);
+    };
+    chip('HandBrakeCLI', hw.handbrake);
+    chip('Intel QSV',    hw.qsv,   true);
+    chip('NVENC',        hw.nvenc, true);
+    chip('AMD VCE',      hw.amd,   true);
+    document.getElementById('hw-status').innerHTML = chips.join('');
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+function renderAll() {
+    const list = document.getElementById('jobs-list');
+    list.innerHTML = '';
+    // Show running first, then queued, then done/failed/cancelled (newest last)
+    const order = { running: 0, queued: 1, done: 2, failed: 2, cancelled: 2 };
+    const sorted = Object.values(_jobs).sort((a, b) => {
+        const od = (order[a.status] ?? 2) - (order[b.status] ?? 2);
+        if (od !== 0) return od;
+        return (a.started_at || 0) - (b.started_at || 0);
+    });
+    sorted.forEach(j => { list.appendChild(buildCard(j)); });
+    updateNoJobs();
+}
+
+function renderJob(id) {
+    const job = _jobs[id];
+    if (!job) return;
+    const existing = document.getElementById('job-' + id);
+    const card = buildCard(job);
+    if (existing) {
+        existing.replaceWith(card);
+    } else {
+        document.getElementById('jobs-list').prepend(card);
+    }
+}
+
+function updateNoJobs() {
+    const noJobs = document.getElementById('no-jobs');
+    noJobs.style.display = Object.keys(_jobs).length === 0 ? '' : 'none';
+}
+
+function buildCard(job) {
+    const div = document.createElement('div');
+    div.id = 'job-' + job.id;
+    div.className = `job-card ${job.status}`;
+
+    const badgeLabels = { queued: 'Queued', running: 'Encoding', done: 'Done ✓', failed: 'Failed ✗', cancelled: 'Cancelled' };
+    const badge = `<span class="job-badge badge-${job.status}">${badgeLabels[job.status] || job.status}</span>`;
+
+    const isActive   = job.status === 'running' || job.status === 'queued';
+    const isRetryable = job.status === 'cancelled' || job.status === 'failed';
+    let action;
+    if (isActive) {
+        if (job.status === 'queued') {
+            const pos = job.queue_pos ?? -1;
+            const qLen = Object.values(_jobs).filter(j => j.status === 'queued').length;
+            action = `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','up')" ${pos <= 0 ? 'disabled' : ''} title="Move up">↑</button>`
+                   + `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','down')" ${pos < 0 || pos >= qLen - 1 ? 'disabled' : ''} title="Move down">↓</button>`
+                   + `<button class="job-action-btn cancel" onclick="cancelJob('${job.id}')" style="margin-left:4px">✕ Cancel</button>`;
+        } else {
+            action = `<button class="job-action-btn cancel" onclick="cancelJob('${job.id}')">✕ Cancel</button>`;
+        }
+    } else if (isRetryable) {
+        action = `<button class="job-action-btn retry" onclick="retryJob('${job.id}')">↺ Retry</button>`
+                + `<button class="job-action-btn" onclick="dismissJob('${job.id}')" style="margin-left:4px">✕</button>`;
+    } else {
+        const moveBtn = job.moved
+            ? `<button class="job-action-btn moved-done" disabled title="Original replaced">↔ Moved</button>`
+            : `<button class="job-action-btn move" id="move-${job.id}" onclick="moveJob('${job.id}')" title="Replace original with output">↔ Move</button>`;
+        action = moveBtn
+               + `<button class="job-action-btn" onclick="dismissJob('${job.id}')" style="margin-left:4px">✕ Dismiss</button>`;
+    }
+
+    // Names
+    const outName = job.output_name;
+    const inName  = job.input_name;
+
+    // Meta line: encoder + config
+    const qp = job.config?.qp ?? '';
+    const preset = job.config?.preset ?? '';
+    const gpu = job.config?.gpu ?? 'auto';
+    const denoise = job.config?.denoise ? `· denoise:${job.config.denoise}` : '';
+    const crop = job.config?.crop ? '· crop' : '';
+    const enc = job.encoder || 'detecting…';
+    const metaParts = [enc, qp ? `QP:${qp}` : '', preset, denoise, crop].filter(Boolean);
+
+    // Media info row
+    let mediaInfoHtml = '';
+    const mi = job.input_media_info;
+    if (mi && (mi.video_codec || mi.audio_codec)) {
+        const srcRes  = (mi.width && mi.height) ? `${mi.width}×${mi.height}` : '';
+        const srcVid  = [mi.video_codec?.toUpperCase(), srcRes].filter(Boolean).join(' ');
+        const cfgW    = job.config?.width;
+        const tgtRes  = cfgW ? `${cfgW}px` : srcRes;
+        const tgtVid  = ['H.265', tgtRes].filter(Boolean).join(' ');
+        const audio   = [mi.audio_codec?.toUpperCase(), mi.audio_count > 1 ? `×${mi.audio_count}` : ''].filter(Boolean).join(' ');
+        const subs    = mi.sub_count ? `${mi.sub_count} sub${mi.sub_count !== 1 ? 's' : ''}` : '';
+        const right   = [audio, subs].filter(Boolean).join(' · ');
+        mediaInfoHtml = `<div class="job-mediainfo">
+            <span class="mi-src">${escHtml(srcVid)}</span>
+            <span class="mi-arrow">→</span>
+            <span class="mi-tgt">${escHtml(tgtVid)}</span>
+            ${right ? `<span class="mi-streams">${escHtml(right)}</span>` : ''}
+        </div>`;
+    }
+
+    // Progress bar
+    const pct = Math.min(100, job.progress || 0);
+    const barCls = job.status === 'done' ? 'done' : job.status === 'failed' ? 'failed' : '';
+
+    // Stats
+    let statsHtml = '';
+    if (job.status === 'running') {
+        const estSize = (job.output_size && job.progress > 0)
+            ? fmtSize((job.output_size / job.progress) * 100) : null;
+        statsHtml = `
+            <span>FPS: <span class="stat-val">${job.current_fps.toFixed(1)}</span> cur / <span class="stat-val">${job.avg_fps.toFixed(1)}</span> avg</span>
+            <span>ETA: <span class="stat-val">${job.eta || '--'}</span></span>
+            ${job.input_size   ? `<span>Input: <span class="stat-val">${fmtSize(job.input_size)}</span></span>` : ''}
+            ${job.output_size  ? `<span>Size: <span class="stat-val">${fmtSize(job.output_size)}</span>${estSize ? ` / <span class="stat-val">${estSize}</span> est` : ''}</span>` : ''}`;
+    } else if (job.status === 'done') {
+        const elapsed = job.started_at && job.finished_at ? fmtDuration(job.finished_at - job.started_at) : '';
+        let reduc = '';
+        if (job.input_size && job.output_size) {
+            const pct2 = ((1 - job.output_size / job.input_size) * 100).toFixed(1);
+            const cls = parseFloat(pct2) > 0 ? 'stat-green' : 'stat-red';
+            const sign = parseFloat(pct2) > 0 ? '↓' : '↑';
+            reduc = `<span><span class="stat-val">${fmtSize(job.input_size)}</span> → <span class="stat-val">${fmtSize(job.output_size)}</span> <span class="${cls}">(${sign}${Math.abs(parseFloat(pct2))}%)</span></span>`;
+        }
+        statsHtml = `${reduc}${elapsed ? `<span>Time: <span class="stat-val">${elapsed}</span></span>` : ''}`;
+    } else if (job.status === 'queued') {
+        statsHtml = `<span>Waiting to start…</span>`;
+    }
+
+    div.innerHTML = `
+        <div class="job-header">
+            ${badge}
+            <div class="job-name">
+                <div title="${escHtml(outName)}">${escHtml(outName)}</div>
+                <div class="input-name" title="${escHtml(inName)}">from: ${escHtml(inName)}</div>
+            </div>
+            ${action}
+        </div>
+        <div class="job-meta">
+            ${metaParts.map(p => `<span>${p}</span>`).join('')}
+        </div>
+        ${mediaInfoHtml}
+        <div class="job-bar-row">
+            <div class="job-bar">
+                <div class="job-bar-fill ${barCls}" style="width:${pct}%"></div>
+            </div>
+            <span class="job-pct">${pct.toFixed(1)}%</span>
+        </div>
+        <div class="job-stats">${statsHtml}</div>
+        ${job.error ? `<div class="job-error">Error: ${escHtml(job.error)}</div>` : ''}`;
+    return div;
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+async function cancelJob(id) {
+    await fetch(`/encode/${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Delete-Token': DELETE_TOKEN },
+    });
+}
+async function retryJob(id) {
+    await fetch(`/encode/${id}/retry`, {
+        method: 'POST',
+        headers: { 'X-Delete-Token': DELETE_TOKEN },
+    });
+}
+
+const _moveArmed = new Set();
+function moveJob(id) {
+    const btn = document.getElementById('move-' + id);
+    if (!btn) return;
+    if (!_moveArmed.has(id)) {
+        _moveArmed.add(id);
+        btn.classList.add('armed');
+        btn.textContent = '↔ Replace original?';
+        // Auto-disarm after 4 s if not confirmed
+        setTimeout(() => {
+            if (_moveArmed.has(id)) {
+                _moveArmed.delete(id);
+                if (btn.parentNode) {
+                    btn.classList.remove('armed');
+                    btn.textContent = '↔ Move';
+                }
+            }
+        }, 4000);
+        return;
+    }
+    // Second click — confirmed
+    _moveArmed.delete(id);
+    btn.disabled = true;
+    btn.textContent = '…';
+    fetch(`/encode/${id}/move`, {
+        method: 'POST',
+        headers: { 'X-Delete-Token': DELETE_TOKEN },
+    }).then(r => {
+        if (!r.ok) r.text().then(t => { btn.disabled = false; btn.textContent = '↔ Move'; alert('Move failed: ' + t); });
+    });
+}
+async function dismissJob(id) {
+    await fetch(`/encode/${id}/dismiss`, {
+        method: 'DELETE',
+        headers: { 'X-Delete-Token': DELETE_TOKEN },
+    });
+}
+async function reorderJob(id, direction) {
+    await fetch(`/encode/${id}/reorder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+        body: JSON.stringify({ direction }),
+    });
+}
+
+function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ── System info ───────────────────────────────────────────────────────────────
+let _sysinfoLoaded = false;
+
+function onSysinfoToggle(el) {
+    if (el.open && !_sysinfoLoaded) loadSysinfo();
+}
+
+async function loadSysinfo() {
+    _sysinfoLoaded = true;
+    const body = document.getElementById('sysinfo-body');
+    try {
+        const resp = await fetch('/encode/info');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const d = await resp.json();
+        body.innerHTML = renderSysinfo(d);
+    } catch (e) {
+        body.innerHTML = `<span class="si-err">Failed to load: ${escHtml(e.message)}</span>`;
+    }
+}
+
+function renderSysinfo(d) {
+    const ok   = (t, note) => `<span class="si-ok">✓ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
+    const warn = (t, note) => `<span class="si-warn">✗ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
+    const row  = (label, content) => `<div class="si-row"><span class="si-label">${label}</span>${content}</div>`;
+    const sec  = (title, rows) => `<div class="si-section"><div class="si-heading">${title}</div>${rows}</div>`;
+
+    const hw  = d.hw  || {};
+    const hbe = d.hb_encoders || {};
+    const hbVer = d.versions?.handbrake;
+    const fpVer = d.versions?.ffprobe;
+
+    const versions = [
+        row('HandBrakeCLI', hbVer ? ok(escHtml(hbVer)) : warn('Not found', 'install HandBrakeCLI and ensure it is in PATH')),
+        row('ffprobe',      fpVer ? ok(escHtml(fpVer))  : warn('Not found')),
+    ].join('');
+
+    const hwRows = [
+        row('Intel QSV / VAAPI', hw.qsv  ? ok('Present') : warn('Not detected')),
+        row('NVIDIA NVENC',      hw.nvenc ? ok('Present') : warn('Not detected')),
+        row('AMD VCE / VCN',     hw.amd   ? ok('Present') : warn('Not detected')),
+    ].join('');
+
+    const encRow = (label, hwKey, hbKey) => {
+        const hwOk = hw[hwKey], hbOk = hbe[hbKey];
+        let content;
+        if (!hbVer) {
+            content = warn('n/a', 'HandBrakeCLI not installed');
+        } else if (hbOk && hwOk) {
+            content = ok('Ready', 'compiled in · hardware present');
+        } else if (hbOk && !hwOk) {
+            content = `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`;
+        } else if (!hbOk && hwOk) {
+            content = warn('Not compiled in', 'hardware present but this HandBrakeCLI build lacks support');
+        } else {
+            content = warn('Not available');
+        }
+        return row(label, content);
+    };
+    const hbEncRows = [
+        encRow('Intel QSV H.265',   'qsv',   'qsv'),
+        encRow('NVIDIA NVENC H.265','nvenc',  'nvenc'),
+        encRow('AMD VCE H.265',     'amd',   'amd'),
+    ].join('');
+
+    return sec('Components', versions)
+         + sec('Hardware Detected', hwRows)
+         + sec('HandBrakeCLI Encoder Support', hbEncRows);
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+function fmtSize(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B','KB','MB','GB','TB'];
+    let i = 0;
+    while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+    return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+function fmtDuration(secs) {
+    if (!secs) return null;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
+// ── Stats bar ─────────────────────────────────────────────────────────────────
+async function loadStats() {
+    try {
+        const resp = await fetch('/encode/stats');
+        if (!resp.ok) return;
+        const s = await resp.json();
+        const bar = document.getElementById('stats-bar');
+        if (!s.total) { bar.style.display = 'none'; return; }
+        const savedHuman = fmtSize(s.saved_bytes);
+        const ratio = s.total_input > 0 ? ((1 - s.total_output / s.total_input) * 100).toFixed(1) : null;
+        const avgDur = s.avg_duration_secs ? fmtDuration(s.avg_duration_secs) : null;
+        bar.style.display = '';
+        bar.innerHTML =
+            `<span>Total jobs:<span class="sv">${s.total}</span></span>` +
+            `<span>Completed:<span class="sv">${s.done}</span></span>` +
+            (s.failed  ? `<span>Failed:<span class="sv">${s.failed}</span></span>` : '') +
+            (s.saved_bytes > 0 ? `<span>Space saved:<span class="sv green">${savedHuman}${ratio ? ` (${ratio}%)` : ''}</span></span>` : '') +
+            (avgDur ? `<span>Avg time:<span class="sv">${avgDur}</span></span>` : '');
+    } catch (_) {}
+}
+
+// ── Schedule ──────────────────────────────────────────────────────────────────
+function applyScheduleConfig(cfg) {
+    document.getElementById('sched-enabled').checked = !!cfg.enabled;
+    document.getElementById('sched-start').value = cfg.start ?? 22;
+    document.getElementById('sched-end').value   = cfg.end   ?? 6;
+    updateScheduleStatus(cfg);
+}
+
+function updateScheduleStatus(cfg) {
+    const enabled = cfg.enabled ?? document.getElementById('sched-enabled').checked;
+    const start   = parseInt(cfg.start ?? document.getElementById('sched-start').value);
+    const end     = parseInt(cfg.end   ?? document.getElementById('sched-end').value);
+    const summEl  = document.getElementById('schedule-summary-status');
+    const statEl  = document.getElementById('sched-active-status');
+    if (!enabled) {
+        summEl.textContent = '';
+        if (statEl) statEl.textContent = '';
+        return;
+    }
+    const now = new Date().getHours();
+    let active;
+    if (start === end) { active = true; }
+    else if (start < end) { active = now >= start && now < end; }
+    else { active = now >= start || now < end; }
+    const label = `${String(start).padStart(2,'0')}:00 – ${String(end).padStart(2,'0')}:00`;
+    summEl.textContent = `(${label})`;
+    if (statEl) {
+        statEl.textContent = active ? '● encoding allowed now' : '● waiting for window';
+        statEl.className   = 'schedule-status ' + (active ? 'active' : 'waiting');
+    }
+}
+
+async function saveSchedule() {
+    const enabled = document.getElementById('sched-enabled').checked;
+    const start   = parseInt(document.getElementById('sched-start').value) || 0;
+    const end     = parseInt(document.getElementById('sched-end').value)   || 0;
+    const cfg = { enabled, start, end };
+    updateScheduleStatus(cfg);
+    await fetch('/encode/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+        body: JSON.stringify(cfg),
+    });
+}
+
+connectSSE();
+</script>
+</body>
+</html>

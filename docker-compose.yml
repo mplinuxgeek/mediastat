@@ -1,0 +1,15 @@
+services:
+  mediastat:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - /path/to/your/media:/media:ro   # ← change this
+      - mediastat_data:/data
+    environment:
+      MEDIA_ROOT: /media
+      DB_PATH: /data/mediastat.db
+    restart: unless-stopped
+
+volumes:
+  mediastat_data:

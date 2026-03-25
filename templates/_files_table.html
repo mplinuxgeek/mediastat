@@ -1,0 +1,50 @@
+{% if files %}
+<div class="files-table">
+{% for file in files %}
+<div class="file-entry"
+     onclick="if(typeof _batchMode!='undefined'&&_batchMode){const cb=this.querySelector('.batch-cb');if(cb){cb.checked=!cb.checked;updateBatchFab();}}"
+     data-name="{{ file.name | lower }}"
+     data-size="{{ file.size }}"
+     data-mtime="{{ file.mtime }}"
+     data-vcodec="{{ (file.video_codec or '') | lower }}"
+     data-width="{{ file.width or 0 }}"
+     data-height="{{ file.height or 0 }}"
+     data-path="{{ file.path }}"
+     data-ext="{{ file.ext }}"
+     data-needs-transcode="{{ 'true' if file.needs_transcode else 'false' }}"
+     data-audio="{{ (file.audio_codec or '') | lower }}"
+     data-duration="{{ file.duration_sec or file.duration_min or '' }}">
+    <span class="batch-checkbox-cell">
+        <input type="checkbox" class="batch-cb" onclick="event.stopPropagation();updateBatchFab()">
+    </span>
+    <span class="file-name-cell">
+        <button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span>
+    </span>
+    <span class="file-meta">
+        <span class="tag {{ file.ext_class }}">{{ file.ext }}</span>
+        <span class="tag size">{{ file.human_size }}</span>
+        {% if file.video_codec and file.video_codec != 'N/A' %}
+            <span class="tag {{ file.codec_class }}">{{ file.video_codec }}</span>
+            {% if file.width and file.height %}
+            <span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>
+            {% endif %}
+        {% endif %}
+        {% if file.audio_codec and file.audio_codec != 'N/A' %}
+        <span class="tag">{{ file.audio_codec }}</span>
+        {% endif %}
+        {% if file.duration_label %}
+        <span class="tag">{{ file.duration_label }}</span>
+        {% endif %}
+    </span>
+    <span class="file-search-cell">
+        <button class="search-sites-btn" onclick="openSearchMenu(event,this)" title="Search sites">&#9906;</button>
+    </span>
+    <span class="file-actions">
+        <button class="encode-btn" onclick="openEncodeModal(this)" title="Encode / Transcode">&#9881;</button>
+        <button class="rename-btn" onclick="openRenameModal(this)" title="Rename file">&#9998;</button>
+        <button class="delete-btn" onclick="openDeleteModal(this)" title="Delete file">&#10005;</button>
+    </span>
+</div>
+{% endfor %}
+</div>
+{% endif %}

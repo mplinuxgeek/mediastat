@@ -1,0 +1,44 @@
+{% if contents.subdirs or contents.file_count %}
+<div class="dir-block">
+
+    <div class="dirs-container">
+    {% for subdir in contents.subdirs %}
+    <details class="dir-entry"
+             data-name="{{ subdir.name | lower }}"
+             data-size="{{ subdir.size_bytes }}"
+             data-mtime="{{ subdir.mtime }}"
+             data-dir-path="{{ subdir.path | pathquote }}"
+             hx-get="/dir?path={{ subdir.path | pathquote }}"
+             hx-trigger="toggle once"
+             hx-target="find .dir-children"
+             hx-swap="innerHTML">
+        <summary>
+            <span class="chevron">&#9654;</span>
+            <span class="dir-name">{{ subdir.name }}/</span>
+            <span class="dir-size-inline">{{ subdir.size }}</span>
+            <button class="dir-search-btn" onclick="openSearchMenu(event,this)" title="Search sites">&#9906;</button>
+            <button class="dir-encode-btn" onclick="openFolderEncodeModal(event,this)" title="Encode all files in this folder recursively">&#9881;</button>
+            <span class="htmx-indicator">loading…</span>
+        </summary>
+        <div class="dir-children"></div>
+    </details>
+    {% endfor %}
+    </div>
+
+    {% if contents.file_count %}
+        {% if cached_files %}
+        {% with files = cached_files %}{% include "_files_table.html" %}{% endwith %}
+        <div class="files-checking" data-path="{{ dir_path }}" data-count="{{ contents.file_count }}" style="display:none"></div>
+        {% else %}
+        <div class="files-scanning" data-path="{{ dir_path }}" data-total="{{ contents.file_count }}">
+            <div class="scan-progress">
+                <span class="scan-text">scanning <span class="scan-done">0</span>/<span class="scan-total">{{ contents.file_count }}</span></span>
+                <div class="scan-bar"><div class="scan-bar-fill"></div></div>
+            </div>
+        </div>
+        {% endif %}
+    {% endif %}
+</div>
+{% else %}
+<div class="empty">No media files or subdirectories</div>
+{% endif %}

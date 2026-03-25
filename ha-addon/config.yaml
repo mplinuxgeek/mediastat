@@ -1,0 +1,67 @@
+---
+name: "MediaStat"
+version: "1.0.0"
+slug: "mediastat"
+description: "Media browser, health checker and HandBrake transcoder for your library"
+url: "https://github.com/youruser/mediastat"
+# When image is set, HA pulls this instead of building from the Dockerfile.
+# Replace 'youruser' with your GitHub username. The {arch} token is substituted
+# by the supervisor (e.g. amd64, aarch64, armv7).
+image: "ghcr.io/youruser/mediastat-addon-{arch}"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+
+startup: application
+boot: auto
+init: false
+
+# Options exposed in the HA add-on UI
+options:
+  media_path: "/media"
+  log_level: "info"
+
+schema:
+  media_path: str
+  log_level: list(debug|info|warning|error)
+
+# Port used when not using ingress
+ports:
+  8080/tcp: 8080
+ports_description:
+  8080/tcp: "MediaStat web interface"
+
+# Ingress — embeds the UI inside the HA sidebar
+ingress: true
+ingress_port: 8080
+ingress_stream: true
+panel_icon: "mdi:filmstrip"
+panel_title: "MediaStat"
+
+# HA filesystem access
+map:
+  - media:rw    # /media  — HA media directory (movies, TV, etc.)
+  - share:ro    # /share  — optional, for media on network shares mounted by HA
+
+# ── GPU passthrough (pick ONE block and uncomment it) ─────────────────────────
+#
+# Intel QSV / AMD VA-API — expose the DRM render nodes:
+# devices:
+#   - /dev/dri
+#
+# NVIDIA NVENC — expose the NVIDIA device nodes:
+# (the host must have nvidia-container-runtime installed)
+# devices:
+#   - /dev/nvidia0
+#   - /dev/nvidiactl
+#   - /dev/nvidia-uvm
+#   - /dev/nvidia-modeset
+#
+# Note: after editing this file, rebuild and reinstall the add-on.
+# The add-on log will show which GPU was detected on startup.
+
+# Persistent storage lives in /data (backed up with HA backups)
+# The add-on writes:
+#   /data/mediastat.db   — file metadata cache and encode job history
+#   /data/config.yaml    — optional directory config (auto-created on first run)

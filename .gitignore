@@ -1,0 +1,11 @@
+__pycache__/
+config.yaml
+*.pyc
+*.pyo
+*.db
+*.db-shm
+*.db-wal
+.env
+ha-addon/main.py
+ha-addon/requirements.txt
+ha-addon/templates/
