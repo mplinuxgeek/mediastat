@@ -1014,7 +1014,9 @@ def _build_encode_cmd(
     encoder  = _choose_encoder_name(hw, bit_depth, is_hdr, gpu_pref)
     is_10bit = "_10bit" in encoder
     is_qsv   = encoder.startswith("qsv_")
-    preset   = config.get("preset", "quality")
+    # Map UI preset labels → x265/x264 encoder speed presets
+    _PRESET_MAP = {"speed": "veryfast", "fast": "fast", "balanced": "medium", "quality": "slow", "archive": "veryslow"}
+    preset   = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
     qp       = config.get("qp", 18)
     fmt      = config.get("format", "mkv")
     lang     = config.get("lang", "eng").strip().lower() or "eng"
