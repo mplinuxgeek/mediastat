@@ -1,46 +1,33 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 FROM ${BUILD_FROM}
 
-# HandBrake version — resolved at build time from GitHub latest release if not overridden.
-ARG HB_VERSION=
-
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
         ffmpeg \
-        curl \
         vainfo \
         libva-drm2 \
         libvpl2 \
-        # needed by run.sh GPU setup
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# Install official HandBrake CLI binary (includes QSV/NVENC/VCE support).
-# Resolves the download URL from the GitHub releases API asset list so the
-# filename pattern doesn't need to be hardcoded (it changed across releases).
-RUN HB_VER="${HB_VERSION}" ; \
-    if [ -z "${HB_VER}" ]; then \
-        HB_VER="$(curl -fsSL https://api.github.com/repos/HandBrake/HandBrake/releases/latest \
-            | grep '"tag_name"' | head -1 \
-            | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"; \
-    fi \
-    && echo "Installing HandBrake ${HB_VER}" \
-    && HB_URL="$(curl -fsSL "https://api.github.com/repos/HandBrake/HandBrake/releases/tags/${HB_VER}" \
-        | grep '"browser_download_url"' \
-        | grep -i 'HandBrakeCLI.*x86_64.*\.tar\.bz2' \
-        | head -1 \
-        | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')" \
-    && echo "Download URL: ${HB_URL}" \
-    && curl -fsSL "${HB_URL}" -o /tmp/hb.tar.bz2 \
-    && tar -xjf /tmp/hb.tar.bz2 --wildcards --no-anchored 'HandBrakeCLI' \
-        --transform 's|.*/||' -C /usr/local/bin \
-    && chmod +x /usr/local/bin/HandBrakeCLI \
-    && rm /tmp/hb.tar.bz2
+# Install HandBrakeCLI from deb-multimedia.org — their build is compiled with
+# libvpl2 (Intel oneVPL) so QSV hardware encoding works, unlike the official
+# Debian package which is built without hardware encoder support.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb \
+        -o /tmp/dmm-keyring.deb \
+    && dpkg -i /tmp/dmm-keyring.deb && rm /tmp/dmm-keyring.deb \
+    && echo "deb https://www.deb-multimedia.org bookworm main" \
+        > /etc/apt/sources.list.d/deb-multimedia.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends handbrake-cli \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install VA-API drivers (Intel/AMD) — amd64 only; silently skipped on arm
+# Install VA-API drivers (Intel/AMD)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         intel-media-va-driver-non-free \
