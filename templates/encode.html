@@ -648,8 +648,20 @@ function renderSysinfo(d) {
         encRow('AMD VCE H.265',     'amd',   'amd'),
     ].join('');
 
+    const drv = d.drivers || {};
+    const driList = (drv.dri_devices || []).map(d => d.replace('/dev/dri/','')).join(', ') || 'none';
+    const driverRows = [
+        row('/dev/dri devices',    driList !== 'none' ? ok(escHtml(driList)) : warn('none', 'no DRM render nodes — GPU passthrough not enabled')),
+        row('VA-API driver',       drv.vaapi_driver   ? ok(escHtml(drv.vaapi_driver), drv.vaapi_profiles ? `${drv.vaapi_profiles} profiles` : '') : warn('not loaded', 'check VA-API driver install')),
+        row('Intel iHD driver',    drv.intel_iHD  ? ok('iHD_drv_video.so') : warn('not found', 'install intel-media-va-driver-non-free')),
+        row('Intel i965 driver',   drv.intel_i965 ? ok('i965_drv_video.so') : warn('not found', 'optional — older Intel GPUs only')),
+        row('Mesa VA driver',      drv.mesa_va    ? ok('present') : warn('not found', 'optional — AMD / software')),
+        row('Intel oneVPL (libvpl)',drv.libvpl     ? ok('libvpl.so') : warn('not found', 'install libvpl2 for QSV')),
+    ].join('');
+
     return sec('Components', versions)
          + sec('Hardware Detected', hwRows)
+         + sec('Media Drivers', driverRows)
          + sec('HandBrakeCLI Encoder Support', hbEncRows);
 }
 

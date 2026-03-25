@@ -1231,10 +1231,52 @@ async def _run_encode_job(job_id: str) -> None:
             await _save_encode_job(job)
 
 
+def _get_driver_info() -> dict:
+    import glob as _glob
+    info: dict = {
+        "dri_devices": [],
+        "vaapi_driver": None,
+        "vaapi_profiles": 0,
+        "libvpl": False,
+        "intel_iHD": False,
+        "intel_i965": False,
+        "mesa_va": False,
+    }
+
+    # DRI render nodes
+    info["dri_devices"] = sorted(_glob.glob("/dev/dri/renderD*"))
+
+    # Library presence via ldconfig cache
+    try:
+        r = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=5)
+        libs = r.stdout
+        info["libvpl"]    = "libvpl.so"    in libs
+        info["intel_iHD"] = "iHD_drv_video" in libs or bool(_glob.glob("/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so"))
+        info["intel_i965"]= "i965_drv_video" in libs or bool(_glob.glob("/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so"))
+        info["mesa_va"]   = "radeonsi_drv_video" in libs or "nouveau_drv_video" in libs or bool(_glob.glob("/usr/lib/x86_64-linux-gnu/dri/radeonsi_drv_video.so"))
+    except Exception:
+        pass
+
+    # vainfo — tells us which driver is active and how many profiles it exposes
+    if shutil.which("vainfo"):
+        try:
+            r = subprocess.run(["vainfo"], capture_output=True, text=True, timeout=5)
+            output = r.stdout + r.stderr
+            m = re.search(r"Driver version:\s*(.+)", output)
+            if m:
+                info["vaapi_driver"] = m.group(1).strip()
+            info["vaapi_profiles"] = len(re.findall(r"VAProfile", output))
+        except Exception:
+            pass
+
+    return info
+
+
 @app.get("/encode/info")
 async def encode_info():
     """Return component versions and hardware encoder support."""
-    result: dict = {"hw": _hw_accel_info, "versions": {}, "hb_encoders": {}}
+    result: dict = {"hw": _hw_accel_info, "versions": {}, "hb_encoders": {},
+                    "drivers": await asyncio.to_thread(_get_driver_info)}
 
     # ffprobe version
     try:
