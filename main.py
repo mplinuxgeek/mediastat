@@ -128,7 +128,16 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
     _hw_accel_info = await asyncio.to_thread(_detect_hw_accel_sync)
-    log.info("Hardware acceleration: %s", _hw_accel_info)
+    hw = _hw_accel_info
+    log.info("HandBrakeCLI : %s", "found" if hw.get("handbrake") else "NOT FOUND — encoding unavailable")
+    if hw.get("nvenc"):
+        log.info("GPU encoder  : NVIDIA NVENC (H.265 hardware)")
+    elif hw.get("qsv"):
+        log.info("GPU encoder  : Intel QSV (H.265 hardware)")
+    elif hw.get("amd"):
+        log.info("GPU encoder  : AMD VCE/VCN (H.265 hardware)")
+    else:
+        log.info("GPU encoder  : none detected — software x265 will be used")
     await _load_encode_jobs()
     worker = asyncio.create_task(_encode_worker())
     yield
