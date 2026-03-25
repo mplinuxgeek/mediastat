@@ -75,6 +75,7 @@ MEDIA_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".ts", ".m4v"}
 # Concurrency caps
 _PROBE_SEM = asyncio.Semaphore(8)   # max parallel ffprobe processes
 _DU_SEM    = asyncio.Semaphore(8)   # max parallel du processes
+_SCAN_SEM  = asyncio.Semaphore(4)   # max in-flight scan tasks (DB conn + ffprobe)
 
 # In-process TTL cache for directory sizes  {path_str: (size_bytes, timestamp)}
 _dir_size_cache: dict[str, tuple[int, float]] = {}
@@ -447,11 +448,12 @@ async def _file_scan_events(dir_path: Path, request: Request):
     files_meta: list[dict] = []
 
     async def probe_one(f) -> None:
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                meta = await _probe_file(db, Path(f.path))
-        except Exception:
-            meta = None
+        async with _SCAN_SEM:
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    meta = await _probe_file(db, Path(f.path))
+            except Exception:
+                meta = None
         await queue.put(meta)
 
     tasks = [asyncio.create_task(probe_one(f)) for f in mkv_files]
