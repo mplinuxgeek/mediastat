@@ -69,6 +69,7 @@ cd /app
 exec /app/.venv/bin/uvicorn main:app \
     --host 0.0.0.0 \
     --port 8080 \
+    --loop asyncio \
     --log-level "${LOG_LEVEL}" \
     --proxy-headers \
     --forwarded-allow-ips "*"
