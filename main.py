@@ -146,6 +146,8 @@ templates.env.filters["pathquote"] = lambda p: quote(str(p), safe="")
 async def log_requests(request: Request, call_next):
     qs = f"?{request.url.query}" if request.url.query else ""
     log.info("%s %s%s", request.method, request.url.path, qs)
+    # Capture HA ingress base path so templates and redirects can use it
+    request.state.ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
     return await call_next(request)
 
 
@@ -499,20 +501,22 @@ async def index(request: Request):
         "configured_dirs": CONFIGURED_DIRS,
         "delete_token": DELETE_TOKEN,
         "error": request.query_params.get("error"),
+        "ingress_path": request.state.ingress_path,
     })
 
 
 @app.post("/set-root")
-async def set_root(path: str = Form(...)):
+async def set_root(request: Request, path: str = Form(...)):
     global current_root
+    base = request.state.ingress_path
     p = Path(path).expanduser().resolve()
     if ALLOWED_ROOTS and not any(p == allowed or p.is_relative_to(allowed) for allowed in ALLOWED_ROOTS):
-        return RedirectResponse(f"/?error={quote(path)}+not+permitted", status_code=303)
+        return RedirectResponse(f"{base}/?error={quote(path)}+not+permitted", status_code=303)
     if not p.is_dir():
-        return RedirectResponse(f"/?error={quote(path)}+not+found", status_code=303)
+        return RedirectResponse(f"{base}/?error={quote(path)}+not+found", status_code=303)
     current_root = p
     await save_root(p)
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(f"{base}/", status_code=303)
 
 
 @app.get("/dir", response_class=HTMLResponse)
@@ -1261,6 +1265,7 @@ async def encode_page(request: Request):
     return templates.TemplateResponse("encode.html", {
         "request": request,
         "delete_token": DELETE_TOKEN,
+        "ingress_path": request.state.ingress_path,
     })
 
 

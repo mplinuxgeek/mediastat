@@ -297,6 +297,23 @@
 
 <script>
 const DELETE_TOKEN = "{{ delete_token }}";
+const BASE_PATH = "{{ ingress_path }}";
+
+// ── Ingress shim ──────────────────────────────────────────────────────────────
+if (BASE_PATH) {
+    const _fetch = window.fetch;
+    window.fetch = (url, opts) => {
+        if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+        return _fetch(url, opts);
+    };
+    const _ES = window.EventSource;
+    window.EventSource = function(url, cfg) {
+        if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+        return new _ES(url, cfg);
+    };
+    Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+}
+
 let _jobs = {};  // id → job dict
 
 // ── SSE connection ────────────────────────────────────────────────────────────

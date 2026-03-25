@@ -876,7 +876,7 @@
                 onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
             ↺ Rescan
         </button>
-        <a href="/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none">⚙ Jobs</a>
+        <a href="{{ ingress_path }}/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none">⚙ Jobs</a>
     </header>
     <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">
         <span class="sort-label">sort:</span>
@@ -1147,6 +1147,30 @@
 
     <script>
     const DELETE_TOKEN = "{{ delete_token }}";
+    const BASE_PATH = "{{ ingress_path }}";  // e.g. "/api/hassio_ingress/TOKEN" or ""
+
+    // ── Ingress shim ─────────────────────────────────────────────
+    // When running behind HA ingress all absolute paths must be prefixed.
+    if (BASE_PATH) {
+        // Patch fetch
+        const _fetch = window.fetch;
+        window.fetch = (url, opts) => {
+            if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+            return _fetch(url, opts);
+        };
+        // Patch EventSource
+        const _ES = window.EventSource;
+        window.EventSource = function(url, cfg) {
+            if (typeof url === 'string' && url.startsWith('/')) url = BASE_PATH + url;
+            return new _ES(url, cfg);
+        };
+        Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+        // Patch HTMX requests
+        document.addEventListener('htmx:configRequest', evt => {
+            if (evt.detail.path.startsWith('/')) evt.detail.path = BASE_PATH + evt.detail.path;
+        });
+    }
+
     const _encodingPaths = new Set();
 
     function _markEncodingRows() {
@@ -1218,7 +1242,7 @@
             _encodingPaths.add(path);
             _markEncodingRows();
             closeEncodeModal();
-            showToast('Encode started · <a href="/encode" target="_blank">View progress →</a>', 'success', 6000);
+            showToast('Encode started · <a href="' + BASE_PATH + '/encode" target="_blank">View progress →</a>', 'success', 6000);
         } catch (e) {
             showToast('Error: ' + e.message, 'error');
         } finally {
@@ -1293,7 +1317,7 @@
             closeEncodeModal();
             btn.onclick = btn._originalOnclick;
             toggleBatchMode();
-            showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="/encode" target="_blank">View →</a>`, 'success', 6000);
+            showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="' + BASE_PATH + '/encode" target="_blank">View →</a>`, 'success', 6000);
         };
     }
 
@@ -1337,7 +1361,7 @@
                 if (!resp.ok) throw new Error(await resp.text());
                 const data = await resp.json();
                 closeEncodeModal();
-                showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="/encode" target="_blank">View →</a>`, 'success', 7000);
+                showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="' + BASE_PATH + '/encode" target="_blank">View →</a>`, 'success', 7000);
             } catch (e) {
                 showToast('Error: ' + e.message, 'error');
                 confirmBtn.textContent = '⚙ Start Encode ›';
