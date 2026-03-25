@@ -9,8 +9,6 @@ url: "https://github.com/mplinuxgeek/mediastat"
 image: "ghcr.io/mplinuxgeek/mediastat-addon-{arch}"
 arch:
   - amd64
-  - aarch64
-  - armv7
 
 startup: application
 boot: auto

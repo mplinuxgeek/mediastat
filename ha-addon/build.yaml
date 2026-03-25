@@ -1,12 +1,10 @@
 ---
 build_from:
   amd64: "ghcr.io/home-assistant/amd64-base-debian:bookworm"
-  aarch64: "ghcr.io/home-assistant/aarch64-base-debian:bookworm"
-  armv7: "ghcr.io/home-assistant/armv7-base-debian:bookworm"
 
 squash: false
 labels:
   org.opencontainers.image.title: "MediaStat"
   org.opencontainers.image.description: "Media browser and HandBrake transcoder"
-  org.opencontainers.image.source: "https://github.com/youruser/mediastat"
+  org.opencontainers.image.source: "https://github.com/mplinuxgeek/mediastat"
   org.opencontainers.image.licenses: "MIT"
