@@ -1,18 +1,31 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 FROM ${BUILD_FROM}
 
+# HandBrake version — use official release binary which has QSV/NVENC/VCE compiled in.
+# The Debian package is built without hardware encoder support (libmfx is non-free).
+ARG HB_VERSION=1.9.2
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
         ffmpeg \
-        handbrake-cli \
+        curl \
         vainfo \
         libva-drm2 \
+        libvpl2 \
         # needed by run.sh GPU setup
         util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+# Install official HandBrake CLI binary (includes QSV/NVENC/VCE support)
+RUN curl -fsSL \
+        "https://github.com/HandBrake/HandBrake/releases/download/${HB_VERSION}/HandBrakeCLI-${HB_VERSION}-x86_64.tar.bz2" \
+        -o /tmp/hb.tar.bz2 \
+    && tar -xjf /tmp/hb.tar.bz2 -C /usr/local/bin HandBrakeCLI \
+    && chmod +x /usr/local/bin/HandBrakeCLI \
+    && rm /tmp/hb.tar.bz2
 
 # Install VA-API drivers (Intel/AMD) — amd64 only; silently skipped on arm
 RUN apt-get update \
