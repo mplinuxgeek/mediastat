@@ -200,20 +200,28 @@
             white-space: nowrap;
             color: var(--muted);
         }
-        .tag.size          { color: var(--green);  border-color: #2d4a2d; }
+        .tag.size-green    { color: var(--green);  border-color: #2d4a2d; }  /* < 15 GB  */
+        .tag.size-amber    { color: #d29922;       border-color: #4a3a10; }  /* 15–20 GB */
+        .tag.size-red      { color: #f47474;       border-color: #7d2020; }  /* > 20 GB  */
         .tag.codec-h265    { color: #3fb950; border-color: #2d4a2d; }  /* green  — h265/hevc */
         .tag.codec-h264    { color: #d29922; border-color: #4a3a10; }  /* amber  — h264/avc  */
         .tag.codec-av1     { color: #58a6ff; border-color: #1a3a5c; }  /* blue   — av1       */
         .tag.codec-vp9     { color: #a371f7; border-color: #3a1f6e; }  /* purple — vp9       */
         .tag.codec-other   { color: var(--muted); }
-        .tag.ext-mkv       { color: #3fb950; border-color: #2d4a2d; }  /* green  — preferred */
-        .tag.ext-mp4       { color: #d29922; border-color: #4a3a10; }  /* amber  — acceptable */
-        .tag.ext-avi       { color: #f47474; border-color: #7d2020; }  /* red    — legacy    */
-        .tag.ext-other     { color: var(--muted); }
+        .tag.ext-mkv       { color: #4ec9b0; border-color: #1a4a40; }  /* teal */
+        .tag.ext-mp4       { color: #4ec9b0; border-color: #1a4a40; }  /* teal */
+        .tag.ext-avi       { color: #4ec9b0; border-color: #1a4a40; }  /* teal */
+        .tag.ext-other     { color: #4ec9b0; border-color: #1a4a40; }  /* teal */
         .tag.res-4k        { color: #3fb950; border-color: #2d4a2d; }  /* green  — 4K        */
         .tag.res-1080      { color: #d29922; border-color: #4a3a10; }  /* amber  — 1080p     */
         .tag.res-low       { color: #f47474; border-color: #7d2020; }  /* red    — 720p/SD   */
         .tag.res-unknown   { color: var(--muted); }
+        .tag.hdr-dv        { color: #3fb950; border-color: #2d4a2d; }  /* green  — Dolby Vision */
+        .tag.hdr-hdr       { color: #3fb950; border-color: #2d4a2d; }  /* green  — HDR10        */
+        .tag.hdr-hlg       { color: #3fb950; border-color: #2d4a2d; }  /* green  — HLG          */
+        .tag.hdr-sdr       { color: var(--muted); border-color: var(--border); } /* muted — SDR */
+        .tag.audio         { color: #79c0ff; border-color: #1a3a5c; }            /* light blue — audio codec */
+        .tag.duration      { color: #d2a8ff; border-color: #3a1f6e; }            /* purple — duration */
 
         .empty {
             color: var(--muted);
@@ -605,29 +613,30 @@
         .player-close:hover { color: var(--text); }
 
         /* ── Media info modal ────────────────────────────────────── */
+        #mediainfo-modal { background: rgba(0,0,0,0.82); }
         .mediainfo-inner { max-width: 640px; width: 96vw; }
         .mediainfo-body {
             padding: 16px 20px 20px;
             overflow-y: auto;
             max-height: calc(90vh - 44px);
-            font-size: 13px;
+            font-size: 15px;
         }
-        .mi-section { margin-bottom: 16px; }
+        .mi-section { margin-bottom: 18px; }
         .mi-section:last-child { margin-bottom: 0; }
         .mi-section-title {
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.06em;
             color: var(--muted);
-            margin-bottom: 6px;
+            margin-bottom: 8px;
             padding-bottom: 4px;
             border-bottom: 1px solid var(--border);
         }
         .mi-grid {
             display: grid;
-            grid-template-columns: 140px 1fr;
-            gap: 3px 10px;
+            grid-template-columns: 160px 1fr;
+            gap: 5px 12px;
         }
         .mi-key   { color: var(--muted); white-space: nowrap; }
         .mi-val   { color: var(--text);  word-break: break-all; }
@@ -1041,9 +1050,11 @@
 
                 <span class="encode-field-label">Encoder speed</span>
                 <select id="enc-preset" class="modal-input">
+                    <option value="archive">Archive (veryslow)</option>
                     <option value="quality">Quality (slow)</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="speed">Speed (fast)</option>
+                    <option value="balanced">Balanced (medium)</option>
+                    <option value="fast">Fast</option>
+                    <option value="speed">Speed (veryfast)</option>
                 </select>
                 <span></span>
 
@@ -1237,7 +1248,7 @@
         fast:     { qp: 22, preset: 'speed',    denoise: '', crop: false },
         balanced: { qp: 20, preset: 'balanced', denoise: '', crop: true  },
         quality:  { qp: 18, preset: 'quality',  denoise: '', crop: true  },
-        archive:  { qp: 16, preset: 'quality',  denoise: '', crop: true  },
+        archive:  { qp: 16, preset: 'archive',  denoise: '', crop: true  },
     };
     const _ENCODE_PRESET_LABELS = { fast: 'Fast', balanced: 'Balanced', quality: 'Quality', archive: 'Archive' };
 
@@ -1295,7 +1306,7 @@
             _encodingPaths.add(path);
             _markEncodingRows();
             closeEncodeModal();
-            showToast('Encode started · <a href="' + BASE_PATH + '/encode" target="_blank">View progress →</a>', 'success', 6000);
+            showToast('Encode started · <a href="' + BASE_PATH + '/encode">View progress →</a>', 'success', 6000);
         } catch (e) {
             showToast('Error: ' + e.message, 'error');
         } finally {
@@ -1370,7 +1381,7 @@
             closeEncodeModal();
             btn.onclick = btn._originalOnclick;
             toggleBatchMode();
-            showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="' + BASE_PATH + '/encode" target="_blank">View →</a>`, 'success', 6000);
+            showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 6000);
         };
     }
 
@@ -1414,7 +1425,7 @@
                 if (!resp.ok) throw new Error(await resp.text());
                 const data = await resp.json();
                 closeEncodeModal();
-                showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="' + BASE_PATH + '/encode" target="_blank">View →</a>`, 'success', 7000);
+                showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 7000);
             } catch (e) {
                 showToast('Error: ' + e.message, 'error');
                 confirmBtn.textContent = '⚙ Start Encode ›';
@@ -2056,8 +2067,11 @@
     }
 
     function renderMediaInfo(d) {
-        const kv = (k, v) => v != null && v !== '' && v !== 0
+        const kv    = (k, v) => v != null && v !== '' && v !== 0
             ? `<span class="mi-key">${k}</span><span class="mi-val">${escHtml(String(v))}</span>`
+            : '';
+        const kvRaw = (k, v) => v != null && v !== ''
+            ? `<span class="mi-key">${k}</span><span class="mi-val">${v}</span>`
             : '';
         const sec = (title, rows) => rows
             ? `<div class="mi-section"><div class="mi-section-title">${title}</div><div class="mi-grid">${rows}</div></div>`
@@ -2079,7 +2093,7 @@
             const hdrBadge = v.hdr ? '<span class="mi-badge hdr">HDR</span>' : '';
             const res = v.width && v.height ? `${v.width}×${v.height}` : '';
             const rows = [
-                kv('Codec',       v.codec + (v.profile ? ' / '+v.profile : '') + hdrBadge),
+                kvRaw('Codec',    escHtml(v.codec + (v.profile ? ' / '+v.profile : '')) + hdrBadge),
                 kv('Resolution',  res),
                 kv('Frame rate',  v.fps > 0 ? v.fps+' fps' : ''),
                 kv('Pixel format',v.pix_fmt),

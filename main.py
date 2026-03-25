@@ -129,15 +129,15 @@ async def lifespan(app: FastAPI):
                 pass
     _hw_accel_info = await asyncio.to_thread(_detect_hw_accel_sync)
     hw = _hw_accel_info
-    log.info("HandBrakeCLI : %s", "found" if hw.get("handbrake") else "NOT FOUND — encoding unavailable")
-    if hw.get("nvenc"):
-        log.info("GPU encoder  : NVIDIA NVENC (H.265 hardware)")
-    elif hw.get("qsv"):
-        log.info("GPU encoder  : Intel QSV (H.265 hardware)")
-    elif hw.get("amd"):
-        log.info("GPU encoder  : AMD VCE/VCN (H.265 hardware)")
+    log.info("ffmpeg       : %s", "found" if shutil.which("ffmpeg") else "NOT FOUND — encoding unavailable")
+    if hw.get("qsv"):
+        log.info("GPU encoder  : Intel QSV (hevc_qsv)")
+    elif hw.get("nvenc"):
+        log.info("GPU encoder  : NVIDIA NVENC (hevc_nvenc)")
+    elif hw.get("vaapi"):
+        log.info("GPU encoder  : VA-API hevc_vaapi — %s", "AMD" if hw.get("amd") else "Intel (QSV unavailable)")
     else:
-        log.info("GPU encoder  : none detected — software x265 will be used")
+        log.info("GPU encoder  : none detected — software libx265 will be used")
     await _load_encode_jobs()
     worker = asyncio.create_task(_encode_worker())
     yield
@@ -174,13 +174,15 @@ async def init_db():
                 height      INTEGER,
                 duration_min INTEGER,
                 scanned_at   REAL,
-                duration_sec REAL
+                duration_sec REAL,
+                hdr_type     TEXT
             )
         """)
         # Migrations: add columns to existing databases
         for col_sql in [
             "ALTER TABLE file_meta ADD COLUMN scanned_at REAL",
             "ALTER TABLE file_meta ADD COLUMN duration_sec REAL",
+            "ALTER TABLE file_meta ADD COLUMN hdr_type TEXT",
         ]:
             try:
                 await db.execute(col_sql)
@@ -255,11 +257,37 @@ def res_css_class(width: int, height: int) -> str:
     return "res-unknown"
 
 
+def hdr_css_class(hdr_type: str) -> str:
+    return {"DV": "hdr-dv", "HDR": "hdr-hdr", "HLG": "hdr-hlg"}.get(hdr_type or "", "hdr-sdr")
+
+
+_GB = 1024 ** 3
+
+def size_css_class(size_bytes: int) -> str:
+    if size_bytes >= 20 * _GB: return "size-red"
+    if size_bytes >= 15 * _GB: return "size-amber"
+    return "size-green"
+
+
+def _hdr_type_from_stream(video: dict) -> str:
+    """Return 'DV', 'HDR', 'HLG', or 'SDR' from ffprobe stream data."""
+    profile = (video.get("profile") or "").lower()
+    if "dolby vision" in profile:
+        return "DV"
+    ct = video.get("color_transfer") or ""
+    if ct == "smpte2084":
+        return "HDR"
+    if ct == "arib-std-b67":
+        return "HLG"
+    return "SDR"
+
+
 async def run_ffprobe(path: Path) -> dict:
     async with _PROBE_SEM:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=codec_name,codec_type,width,height:format=duration",
+            "-show_entries",
+            "stream=codec_name,codec_type,width,height,color_transfer,profile:format=duration",
             "-of", "json", str(path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -270,7 +298,8 @@ async def run_ffprobe(path: Path) -> dict:
             proc.kill()
             await proc.wait()
             log.warning("ffprobe timed out for %s", path)
-            return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None, "duration_min": 0, "duration_sec": 0.0}
+            return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None,
+                    "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR"}
 
     try:
         data = json.loads(stdout)
@@ -284,10 +313,12 @@ async def run_ffprobe(path: Path) -> dict:
             "height": video.get("height"),
             "duration_min": round(duration / 60),
             "duration_sec": duration,
+            "hdr_type": _hdr_type_from_stream(video),
         }
     except Exception:
         log.warning("ffprobe parse failed for %s", path, exc_info=True)
-        return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None, "duration_min": 0, "duration_sec": 0.0}
+        return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None,
+                "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR"}
 
 
 def _fmt_duration(secs: float | None) -> str:
@@ -320,8 +351,8 @@ async def get_file_meta(db: aiosqlite.Connection, path: Path) -> dict:
                  "scanned_at": time.time()})
     await db.execute(
         """INSERT OR REPLACE INTO file_meta
-           (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec)
-           VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec)""",
+           (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec, hdr_type)
+           VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type)""",
         meta,
     )
     await db.commit()
@@ -369,9 +400,11 @@ async def _probe_file(db: aiosqlite.Connection, f: Path) -> dict | None:
         meta["stem"] = f.stem
         meta["ext"]  = f.suffix.lower()
         meta["human_size"]  = human_size(meta["size"])
+        meta["size_class"]  = size_css_class(meta.get("size") or 0)
         meta["codec_class"] = codec_css_class(meta.get("video_codec", ""))
         meta["ext_class"]      = ext_css_class(f.suffix)
         meta["res_class"]      = res_css_class(meta.get("width") or 0, meta.get("height") or 0)
+        meta["hdr_class"]      = hdr_css_class(meta.get("hdr_type") or "")
         meta["needs_transcode"] = (meta.get("audio_codec") or "").lower() not in BROWSER_SAFE_AUDIO
         meta["duration_label"] = _fmt_duration(meta.get("duration_sec") or (meta.get("duration_min") or 0) * 60)
         return meta
@@ -423,9 +456,11 @@ async def scan_dir(dir_path: Path) -> tuple[dict, list[dict]]:
         row["stem"]            = stem
         row["ext"]             = ext.lower()
         row["human_size"]      = human_size(row["size"])
+        row["size_class"]      = size_css_class(row.get("size") or 0)
         row["codec_class"]     = codec_css_class(row.get("video_codec") or "")
         row["ext_class"]       = ext_css_class(ext)
         row["res_class"]       = res_css_class(row.get("width") or 0, row.get("height") or 0)
+        row["hdr_class"]       = hdr_css_class(row.get("hdr_type") or "")
         row["needs_transcode"] = (row.get("audio_codec") or "").lower() not in BROWSER_SAFE_AUDIO
         row["duration_label"] = _fmt_duration(row.get("duration_sec") or (row.get("duration_min") or 0) * 60)
         cached.append(row)
@@ -1014,8 +1049,7 @@ async def _load_encode_jobs() -> None:
 
 def _detect_hw_accel_sync() -> dict:
     import glob as _glob
-    result = {"handbrake": False, "qsv": False, "nvenc": False, "amd": False}
-    result["handbrake"] = shutil.which("HandBrakeCLI") is not None
+    result = {"qsv": False, "nvenc": False, "amd": False, "vaapi": False}
     if shutil.which("nvidia-smi"):
         try:
             r = subprocess.run(
@@ -1033,9 +1067,34 @@ def _detect_hw_accel_sync() -> dict:
             with open(vfiles[0]) as f:
                 vid = f.read().strip()
             if vid == "0x8086":
-                result["qsv"] = True
+                result["vaapi"] = True
+                # Verify QSV session can actually be created — libvpl/libmfx may
+                # not be functional even when the Intel GPU is present.
+                if shutil.which("ffmpeg"):
+                    try:
+                        r = subprocess.run(
+                            ["ffmpeg", "-v", "error",
+                             "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+                             "-init_hw_device", "qsv=hw@va",
+                             "-filter_hw_device", "hw",
+                             "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+                             "-vframes", "1", "-c:v", "hevc_qsv", "-f", "null", "-"],
+                            capture_output=True, timeout=15,
+                            env={**os.environ, "LIBVA_DRIVER_NAME": "iHD"},
+                        )
+                        if r.returncode == 0:
+                            result["qsv"] = True
+                            log.info("QSV probe    : hevc_qsv functional")
+                        else:
+                            err = (r.stderr or b"").decode(errors="replace").strip().splitlines()
+                            log.warning("QSV probe    : hevc_qsv unavailable — falling back to hevc_vaapi")
+                            for line in err[-5:]:
+                                log.warning("QSV probe    : %s", line)
+                    except Exception as e:
+                        log.warning("QSV probe    : test failed (%s) — falling back to hevc_vaapi", e)
             elif vid == "0x1002":
-                result["amd"] = True
+                result["amd"]   = True
+                result["vaapi"] = True
         except Exception:
             pass
     return result
@@ -1088,57 +1147,133 @@ async def _encode_worker() -> None:
             log.error("Encode worker error for job %s: %s", job_id, exc, exc_info=True)
 
 
-def _choose_encoder_name(hw: dict, bit_depth: Optional[int], is_hdr: bool, gpu_pref: str) -> str:
-    use_10bit = is_hdr or bool(bit_depth and bit_depth >= 10)
-    def enc(base: str) -> str:
-        return f"{base}_10bit" if use_10bit else base
-    if gpu_pref == "none":   return enc("x265")
-    if gpu_pref == "intel":  return enc("qsv_h265")  if hw.get("qsv")   else enc("x265")
-    if gpu_pref == "nvidia": return enc("nvenc_h265") if hw.get("nvenc") else enc("x265")
-    if gpu_pref == "amd":    return enc("vce_h265")   if hw.get("amd")   else enc("x265")
-    if hw.get("nvenc"): return enc("nvenc_h265")
-    if hw.get("qsv"):   return enc("qsv_h265")
-    if hw.get("amd"):   return enc("vce_h265")
-    return enc("x265")
+def _choose_encoder_name(hw: dict, gpu_pref: str) -> str:
+    """Return ffmpeg encoder name based on available hardware and user preference."""
+    if gpu_pref == "none":    return "libx265"
+    if gpu_pref == "intel":   return "hevc_qsv"  if hw.get("qsv")   else "libx265"
+    if gpu_pref == "nvidia":  return "hevc_nvenc" if hw.get("nvenc") else "libx265"
+    if gpu_pref == "amd":     return "hevc_vaapi" if hw.get("amd")   else "libx265"
+    # Auto: prefer QSV (Intel) > NVENC > VAAPI (AMD) > software
+    if hw.get("qsv"):    return "hevc_qsv"
+    if hw.get("nvenc"):  return "hevc_nvenc"
+    if hw.get("vaapi"):  return "hevc_vaapi"
+    return "libx265"
 
 
-def _build_encode_cmd(
+def _build_ffmpeg_cmd(
     input_path: str, output_path: str, config: dict,
     hw: dict, bit_depth: Optional[int] = None, is_hdr: bool = False,
+    color_primaries: str = "", transfer_characteristics: str = "",
+    color_space: str = "", color_range: str = "",
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
-    encoder  = _choose_encoder_name(hw, bit_depth, is_hdr, gpu_pref)
-    is_10bit = "_10bit" in encoder
-    is_qsv   = encoder.startswith("qsv_")
-    # Map UI preset labels → x265/x264 encoder speed presets
-    _PRESET_MAP = {"speed": "veryfast", "fast": "fast", "balanced": "medium", "quality": "slow", "archive": "veryslow"}
-    preset   = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
+    encoder  = _choose_encoder_name(hw, gpu_pref)
+    is_qsv   = encoder == "hevc_qsv"
+    is_vaapi = encoder == "hevc_vaapi"
+    is_nvenc = encoder == "hevc_nvenc"
+    is_10bit = is_hdr or bool(bit_depth and bit_depth >= 10)
     qp       = config.get("qp", 18)
-    fmt      = config.get("format", "mkv")
-    lang     = config.get("lang", "eng").strip().lower() or "eng"
-    # Audio: keep requested language + untagged (und) so streams with no
-    # language tag are preserved when no matching tagged stream exists.
-    audio_lang_list = f"{lang},und"
-    cmd = [
-        "HandBrakeCLI", "-i", input_path, "-o", output_path,
-        "--encoder", encoder, "--encoder-preset", preset,
-        "--quality", str(qp),
-        "--aencoder", "copy:aac",
-        "--audio-lang-list", audio_lang_list, "--all-audio",
-        "--subtitle-lang-list", lang, "--all-subtitles",
-    ]
-    if is_10bit:
-        cmd += ["--encoder-profile", "main10", "--encoder-level", "5.1"]
-        if is_qsv:
-            cmd += ["--qsv-async-depth", "4", "--encopts", "lookahead=32:vbv-bufsize=100000", "--vb", "50000"]
-    denoise = config.get("denoise")
-    if denoise:
-        cmd += ["--denoise", denoise if ":" in denoise else f"nlmeans:{denoise}"]
-    if config.get("crop"):
-        cmd += ["--crop-mode", "auto"]
-    width = config.get("width")
-    if width:
-        cmd += ["--width", str(int(width))]
+    denoise  = config.get("denoise")
+    width    = config.get("width")
+
+    _PRESET_MAP = {"speed": "veryfast", "fast": "fast", "balanced": "medium",
+                   "quality": "slow", "archive": "veryslow"}
+    preset = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
+
+    cmd = ["ffmpeg", "-y",
+           "-analyzeduration", "100M", "-probesize", "100M"]
+
+    if is_qsv:
+        cmd += ["-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+                "-init_hw_device", "qsv=hw@va",
+                "-filter_hw_device", "hw"]
+    elif is_vaapi:
+        cmd += ["-vaapi_device", "/dev/dri/renderD128"]
+    elif is_nvenc:
+        cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+
+    cmd += ["-i", input_path]
+
+    # Build color metadata flags from actual source values; nothing is hardcoded.
+    # For HDR sources missing primaries/trc we fall back to the bt2020/smpte2084
+    # defaults that cover the vast majority of HDR10 content.
+    cp = color_primaries or ("bt2020"    if is_hdr else "")
+    tc = transfer_characteristics or ("smpte2084" if is_hdr else "")
+    cs = color_space   # e.g. "bt2020nc", "bt709", ""
+    cr = color_range   # e.g. "tv", "pc", ""
+
+    # Flat list of -flag value pairs for all non-empty color metadata fields
+    color_meta: list[str] = []
+    if cp: color_meta += ["-color_primaries", cp]
+    if tc: color_meta += ["-color_trc",        tc]
+    if cs: color_meta += ["-colorspace",        cs]
+    if cr: color_meta += ["-color_range",       cr]
+
+    if is_qsv:
+        pix_fmt = "p010le" if is_10bit else "nv12"
+        vf = []
+        if denoise:
+            vf.append("hqdn3d")
+        vf.append(f"format={pix_fmt}")
+        if width:
+            vf.append(f"scale={int(width)}:-2")
+        vf.append("hwupload=extra_hw_frames=64")
+        cmd += ["-vf", ",".join(vf)]
+        cmd += ["-c:v", encoder, "-global_quality", str(qp), "-preset", preset]
+        if is_10bit:
+            cmd += ["-profile:v", "main10"]
+        cmd += color_meta
+    elif is_vaapi:
+        pix_fmt = "p010" if is_10bit else "nv12"
+        vf = []
+        if denoise:
+            vf.append("hqdn3d")
+        vf.append(f"format={pix_fmt}")
+        if width:
+            vf.append(f"scale={int(width)}:-2")
+        vf.append("hwupload")
+        cmd += ["-vf", ",".join(vf)]
+        cmd += ["-c:v", encoder, "-qp", str(qp)]
+        if is_10bit:
+            cmd += ["-profile:v", "main10"]
+        cmd += color_meta
+    elif is_nvenc:
+        vf = []
+        if width:
+            vf.append(f"scale={int(width)}:-2")
+        if vf:
+            cmd += ["-vf", ",".join(vf)]
+        cmd += ["-c:v", encoder, "-rc:v", "constqp", "-qp:v", str(qp), "-preset", "p4"]
+        if is_10bit:
+            cmd += ["-profile:v", "main10"]
+        cmd += color_meta
+    else:  # libx265
+        vf = []
+        if denoise:
+            vf.append("hqdn3d")
+        if width:
+            vf.append(f"scale={int(width)}:-2")
+        if vf:
+            cmd += ["-vf", ",".join(vf)]
+        cmd += ["-c:v", encoder, "-crf", str(qp), "-preset", preset]
+        if is_hdr and cp and tc:
+            # Embed HDR10 metadata in the x265 bitstream; use source colormatrix
+            # (cs) when available, otherwise default to bt2020nc.
+            colormatrix = cs if cs else "bt2020nc"
+            cmd += ["-x265-params",
+                    f"hdr-opt=1:repeat-headers=1"
+                    f":colorprim={cp}:transfer={tc}:colormatrix={colormatrix}"]
+        # Also set container-level color metadata for all paths
+        cmd += color_meta
+
+    # Copy all audio/subtitle streams; -ignore_unknown drops streams the
+    # container doesn't support (e.g. PGS subs in MP4) rather than failing.
+    cmd += ["-c:a", "copy", "-c:s", "copy"]
+    cmd += ["-map", "0", "-ignore_unknown"]
+    # Structured progress to stdout; suppress the normal stats line on stderr
+    cmd += ["-progress", "pipe:1", "-nostats"]
+    cmd += [output_path]
+
     return cmd, encoder
 
 
@@ -1149,9 +1284,6 @@ def _validated_lang(value: object) -> str:
     return s if _LANG_RE.match(s) else "eng"
 
 
-_HB_PROGRESS_RE = re.compile(
-    r"Encoding: task \d+ of \d+, (\d+\.\d+) % \((\d+\.\d+) fps, avg (\d+\.\d+) fps, ETA ([\dhms]+)\)"
-)
 
 
 async def _run_encode_job(job_id: str) -> None:
@@ -1166,21 +1298,24 @@ async def _run_encode_job(job_id: str) -> None:
 
         input_path = Path(job.input_path)
 
-        # Probe all streams: HDR/bit-depth detection + media info for display
+        # Probe all streams + format: HDR/bit-depth/DV detection, duration for progress
         bit_depth: Optional[int] = None
         is_hdr = False
+        is_dv  = False
+        duration_sec: Optional[float] = None
+        cp = tc = cs = cr = ""
         try:
             async with _PROBE_SEM:
                 p = await asyncio.create_subprocess_exec(
                     "ffprobe", "-v", "error",
-                    "-show_entries",
-                    "stream=codec_type,codec_name,width,height,"
-                    "bits_per_raw_sample,pix_fmt,color_primaries,transfer_characteristics",
+                    "-analyzeduration", "100M", "-probesize", "100M",
+                    "-show_streams", "-show_format",
                     "-of", "json", str(input_path),
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, _ = await asyncio.wait_for(p.communicate(), timeout=30)
-            streams = json.loads(stdout).get("streams", [])
+            probe = json.loads(stdout)
+            streams = probe.get("streams", [])
             v_streams = [s for s in streams if s.get("codec_type") == "video"]
             a_streams = [s for s in streams if s.get("codec_type") == "audio"]
             s_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
@@ -1190,11 +1325,26 @@ async def _run_encode_job(job_id: str) -> None:
             if bps:
                 bit_depth = int(bps)
             elif "pix_fmt" in vst:
-                m = re.search(r"(\d+)le$", vst["pix_fmt"])
+                m = re.search(r"(\d+)(?:le|be)$", vst["pix_fmt"])
                 if m:
                     bit_depth = int(m.group(1))
-            cp, tc = vst.get("color_primaries", ""), vst.get("transfer_characteristics", "")
+            cp = vst.get("color_primaries", "")
+            tc = vst.get("transfer_characteristics", "")
+            cs = vst.get("color_space", "")
+            cr = vst.get("color_range", "")
             is_hdr = cp == "bt2020" or tc in ("smpte2084", "arib-std-b67")
+            # Dolby Vision: detected via side_data RPU entry
+            for sd in vst.get("side_data_list", []):
+                if "dovi" in sd.get("side_data_type", "").lower():
+                    is_dv = True
+                    break
+            if is_dv:
+                log.warning("Encode %s: Dolby Vision detected — DV RPU metadata cannot be "
+                            "preserved through re-encoding; output will be HDR10/HLG", job_id[:8])
+            try:
+                duration_sec = float(probe.get("format", {}).get("duration") or 0) or None
+            except (TypeError, ValueError):
+                pass
             job.input_media_info = {
                 "video_codec": vst.get("codec_name", ""),
                 "width":       vst.get("width", 0),
@@ -1207,8 +1357,9 @@ async def _run_encode_job(job_id: str) -> None:
         except Exception as e:
             log.warning("Encode %s: could not get stream info: %s", job_id[:8], e)
 
-        cmd, encoder = _build_encode_cmd(
-            job.input_path, job.output_path, job.config, _hw_accel_info, bit_depth, is_hdr
+        cmd, encoder = _build_ffmpeg_cmd(
+            job.input_path, job.output_path, job.config, _hw_accel_info,
+            bit_depth, is_hdr, cp, tc, cs, cr
         )
         job.encoder = encoder
         try:
@@ -1218,10 +1369,12 @@ async def _run_encode_job(job_id: str) -> None:
         _notify_encode(job_id)
 
         log.info("Encode %s: %s", job_id[:8], " ".join(cmd))
+        ff_env = {**os.environ, "LIBVA_DRIVER_NAME": "iHD"}
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,  # -progress pipe:1 → structured progress
+            stderr=asyncio.subprocess.PIPE,  # ffmpeg log output
+            env=ff_env,
         )
         job._proc = proc
 
@@ -1234,23 +1387,34 @@ async def _run_encode_job(job_id: str) -> None:
                     stderr_lines.append(line)
 
         stderr_task = asyncio.create_task(_drain_stderr())
+        duration_us = int(duration_sec * 1e6) if duration_sec else 0
         last_notify = 0.0
         buf = ""
 
+        # ffmpeg -progress pipe:1 emits key=value lines; parse for progress updates
         while True:
-            chunk = await proc.stdout.read(4096)
+            chunk = await proc.stdout.read(512)
             if not chunk:
                 break
             buf += chunk.decode(errors="replace")
-            lines = re.split(r"[\r\n]+", buf)
+            lines = buf.split("\n")
             buf = lines[-1]
             for line in lines[:-1]:
-                m = _HB_PROGRESS_RE.search(line)
-                if m:
-                    job.progress    = float(m.group(1))
-                    job.current_fps = float(m.group(2))
-                    job.avg_fps     = float(m.group(3))
-                    job.eta         = m.group(4)
+                key, _, val = line.strip().partition("=")
+                if key == "out_time_us" and duration_us:
+                    try:
+                        job.progress = min(99.0, int(val) / duration_us * 100)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                elif key == "fps":
+                    try:
+                        job.current_fps = float(val)
+                        job.avg_fps = float(val)
+                    except ValueError:
+                        pass
+                elif key == "speed":
+                    pass  # ETA is calculated client-side from elapsed time and progress
+                if key in ("out_time_us", "fps", "total_size"):
                     now = time.monotonic()
                     if now - last_notify >= 0.5:
                         try:
@@ -1278,12 +1442,11 @@ async def _run_encode_job(job_id: str) -> None:
                     pass
             else:
                 job.status = "failed"
-                # Find the most useful error line from stderr
                 err_lines = [l for l in stderr_lines if any(
                     kw in l.lower() for kw in ("error", "failed", "invalid", "cannot", "unable")
                 )]
                 detail = (err_lines[-1] if err_lines else stderr_lines[-1]) if stderr_lines else ""
-                job.error = f"HandBrakeCLI exited with code {proc.returncode}" + (f": {detail}" if detail else "")
+                job.error = f"ffmpeg exited with code {proc.returncode}" + (f": {detail}" if detail else "")
                 if stderr_lines:
                     log.error("Encode %s stderr tail:\n%s", job_id[:8], "\n".join(stderr_lines[-20:]))
 
@@ -1362,8 +1525,21 @@ def _get_driver_info() -> dict:
 @app.get("/encode/info")
 async def encode_info():
     """Return component versions and hardware encoder support."""
-    result: dict = {"hw": _hw_accel_info, "versions": {}, "hb_encoders": {},
+    result: dict = {"hw": _hw_accel_info, "versions": {}, "ff_encoders": {},
                     "drivers": await asyncio.to_thread(_get_driver_info)}
+
+    # ffmpeg version
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(p.communicate(), timeout=5)
+        first = stdout.decode(errors="replace").splitlines()[0]
+        m = re.search(r"version\s+(\S+)", first)
+        result["versions"]["ffmpeg"] = m.group(1) if m else first.strip()
+    except Exception:
+        result["versions"]["ffmpeg"] = None
 
     # ffprobe version
     try:
@@ -1378,37 +1554,22 @@ async def encode_info():
     except Exception:
         result["versions"]["ffprobe"] = None
 
-    # HandBrakeCLI version + encoder support via --help
-    if shutil.which("HandBrakeCLI"):
-        try:
-            p = await asyncio.create_subprocess_exec(
-                "HandBrakeCLI", "--version",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(p.communicate(), timeout=5)
-            text = (stdout + stderr).decode(errors="replace")
-            first = text.splitlines()[0].strip()
-            result["versions"]["handbrake"] = first or None
-        except Exception:
-            result["versions"]["handbrake"] = None
-
-        try:
-            p = await asyncio.create_subprocess_exec(
-                "HandBrakeCLI", "--help",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(p.communicate(), timeout=10)
-            help_text = (stdout + stderr).decode(errors="replace")
-            result["hb_encoders"] = {
-                "qsv":   bool(re.search(r"\bqsv_h26[45]\b",   help_text)),
-                "nvenc": bool(re.search(r"\bnvenc_h26[45]\b", help_text)),
-                "amd":   bool(re.search(r"\bvce_h26[45]\b",   help_text)),
-            }
-        except Exception:
-            result["hb_encoders"] = {"qsv": False, "nvenc": False, "amd": False}
-    else:
-        result["versions"]["handbrake"] = None
-        result["hb_encoders"] = {"qsv": False, "nvenc": False, "amd": False}
+    # Check which HEVC encoders are compiled into this ffmpeg build
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-encoders", "-v", "quiet",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(p.communicate(), timeout=10)
+        enc_text = (stdout + stderr).decode(errors="replace")
+        result["ff_encoders"] = {
+            "qsv":     "hevc_qsv"   in enc_text,
+            "vaapi":   "hevc_vaapi" in enc_text,
+            "nvenc":   "hevc_nvenc" in enc_text,
+            "libx265": "libx265"    in enc_text,
+        }
+    except Exception:
+        result["ff_encoders"] = {"qsv": False, "vaapi": False, "nvenc": False, "libx265": False}
 
     return result
 
@@ -1485,10 +1646,10 @@ async def start_encode(request: Request, path: str = Query(...)):
     job = EncodeJob(job_id, str(file_path), str(output_path), config)
     _encode_jobs[job_id] = job
 
-    if not _hw_accel_info.get("handbrake"):
+    if not shutil.which("ffmpeg"):
         job.status = "failed"
         job.finished_at = time.time()
-        job.error = "HandBrakeCLI not found in PATH"
+        job.error = "ffmpeg not found in PATH"
         _notify_encode(job_id)
         await _save_encode_job(job)
         return {"job_id": job_id, "error": job.error}
@@ -1523,7 +1684,7 @@ def _make_encode_config(body: dict) -> dict:
 
 
 def _queue_file_encode(file_path: Path, config: dict) -> str | None:
-    """Create and enqueue one encode job. Returns job_id or None if HandBrake missing."""
+    """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
     fmt = config["format"]
     base_stem = f"{file_path.stem} (qp{config['qp']})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
@@ -1535,10 +1696,10 @@ def _queue_file_encode(file_path: Path, config: dict) -> str | None:
     job_id = secrets.token_hex(8)
     job = EncodeJob(job_id, str(file_path), str(candidate), config)
     _encode_jobs[job_id] = job
-    if not _hw_accel_info.get("handbrake"):
+    if not shutil.which("ffmpeg"):
         job.status = "failed"
         job.finished_at = time.time()
-        job.error = "HandBrakeCLI not found in PATH"
+        job.error = "ffmpeg not found in PATH"
         _notify_encode(job_id)
         return None
     _notify_encode(job_id)
@@ -1763,9 +1924,11 @@ async def recently_added(limit: int = Query(default=50, le=200)):
         r["stem"]            = p.stem
         r["ext"]             = p.suffix.lower()
         r["human_size"]      = human_size(r["size"])
+        r["size_class"]      = size_css_class(r.get("size") or 0)
         r["codec_class"]     = codec_css_class(r.get("video_codec") or "")
         r["ext_class"]       = ext_css_class(p.suffix)
         r["res_class"]       = res_css_class(r.get("width") or 0, r.get("height") or 0)
+        r["hdr_class"]       = hdr_css_class(r.get("hdr_type") or "")
         r["needs_transcode"] = (r.get("audio_codec") or "").lower() not in BROWSER_SAFE_AUDIO
         r["duration_label"] = _fmt_duration(r.get("duration_sec") or (r.get("duration_min") or 0) * 60)
         files.append(r)

@@ -86,6 +86,8 @@
         .badge-done      { background: #1a3a24; color: var(--green); }
         .badge-failed    { background: #3a1a1a; color: var(--red); }
         .badge-cancelled { background: var(--surface2); color: var(--muted); }
+        .badge-hw        { background: rgba(63,185,80,0.10); color: var(--green); border: 1px solid #2d4a2d; }
+        .badge-sw        { background: rgba(210,153,34,0.10); color: var(--yellow); border: 1px solid #4a3a10; }
 
         .job-name { flex: 1; font-size: 13px; min-width: 0; overflow: hidden; }
         .job-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -358,18 +360,32 @@ function connectSSE() {
 }
 
 // ── Hardware status ───────────────────────────────────────────────────────────
+let _hw = {};
 function renderHW(hw) {
+    _hw = hw;
     const chips = [];
     const chip = (label, ok, warn) => {
         const cls = ok ? 'ok' : (warn ? 'warn' : 'err');
         const icon = ok ? '✓' : '✗';
         chips.push(`<span class="hw-chip ${cls}">${icon} ${label}</span>`);
     };
-    chip('HandBrakeCLI', hw.handbrake);
-    chip('Intel QSV',    hw.qsv,   true);
-    chip('NVENC',        hw.nvenc, true);
-    chip('AMD VCE',      hw.amd,   true);
+    chip('ffmpeg',    true);
+    chip('VA-API',    hw.vaapi, true);
+    chip('NVENC',     hw.nvenc, true);
+    chip('AMD VAAPI', hw.amd,   true);
     document.getElementById('hw-status').innerHTML = chips.join('');
+}
+
+function encBadgeHtml(enc) {
+    if (!enc || enc === 'detecting…') return '';
+    if (enc === 'hevc_qsv')   return `<span class="job-badge badge-hw">Intel QSV</span>`;
+    if (enc === 'hevc_nvenc') return `<span class="job-badge badge-hw">NVENC</span>`;
+    if (enc === 'hevc_vaapi') {
+        const label = _hw.amd ? 'AMD VA-API' : 'VA-API';
+        return `<span class="job-badge badge-hw">${label}</span>`;
+    }
+    if (enc === 'libx265') return `<span class="job-badge badge-sw">Software</span>`;
+    return '';
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -397,6 +413,15 @@ function renderJob(id) {
     } else {
         document.getElementById('jobs-list').prepend(card);
     }
+    // Re-sort so running jobs always appear at the top
+    const list = document.getElementById('jobs-list');
+    const order = { running: 0, queued: 1, done: 2, failed: 2, cancelled: 2 };
+    [...list.children].sort((a, b) => {
+        const ja = _jobs[a.id.slice(4)], jb = _jobs[b.id.slice(4)];
+        const od = (order[ja?.status] ?? 2) - (order[jb?.status] ?? 2);
+        if (od !== 0) return od;
+        return (ja?.started_at || 0) - (jb?.started_at || 0);
+    }).forEach(el => list.appendChild(el));
 }
 
 function updateNoJobs() {
@@ -478,9 +503,12 @@ function buildCard(job) {
     if (job.status === 'running') {
         const estSize = (job.output_size && job.progress > 0)
             ? fmtSize((job.output_size / job.progress) * 100) : null;
+        const elapsed = job.started_at ? (Date.now() / 1000 - job.started_at) : 0;
+        const eta = (elapsed > 2 && job.progress > 0.5)
+            ? fmtDuration(elapsed / job.progress * (100 - job.progress)) : '--';
         statsHtml = `
             <span>FPS: <span class="stat-val">${job.current_fps.toFixed(1)}</span> cur / <span class="stat-val">${job.avg_fps.toFixed(1)}</span> avg</span>
-            <span>ETA: <span class="stat-val">${job.eta || '--'}</span></span>
+            <span>ETA: <span class="stat-val">${eta}</span></span>
             ${job.input_size   ? `<span>Input: <span class="stat-val">${fmtSize(job.input_size)}</span></span>` : ''}
             ${job.output_size  ? `<span>Size: <span class="stat-val">${fmtSize(job.output_size)}</span>${estSize ? ` / <span class="stat-val">${estSize}</span> est` : ''}</span>` : ''}`;
     } else if (job.status === 'done') {
@@ -492,7 +520,8 @@ function buildCard(job) {
             const sign = parseFloat(pct2) > 0 ? '↓' : '↑';
             reduc = `<span><span class="stat-val">${fmtSize(job.input_size)}</span> → <span class="stat-val">${fmtSize(job.output_size)}</span> <span class="${cls}">(${sign}${Math.abs(parseFloat(pct2))}%)</span></span>`;
         }
-        statsHtml = `${reduc}${elapsed ? `<span>Time: <span class="stat-val">${elapsed}</span></span>` : ''}`;
+        const fpsStat = job.avg_fps > 0 ? `<span>Avg FPS: <span class="stat-val">${job.avg_fps.toFixed(1)}</span></span>` : '';
+        statsHtml = `${reduc}${elapsed ? `<span>Time: <span class="stat-val">${elapsed}</span></span>` : ''}${fpsStat}`;
     } else if (job.status === 'queued') {
         statsHtml = `<span>Waiting to start…</span>`;
     }
@@ -500,6 +529,7 @@ function buildCard(job) {
     div.innerHTML = `
         <div class="job-header">
             ${badge}
+            ${encBadgeHtml(job.encoder)}
             <div class="job-name">
                 <div title="${escHtml(outName)}">${escHtml(outName)}</div>
                 <div class="input-name" title="${escHtml(inName)}">from: ${escHtml(inName)}</div>
@@ -611,41 +641,32 @@ function renderSysinfo(d) {
     const sec  = (title, rows) => `<div class="si-section"><div class="si-heading">${title}</div>${rows}</div>`;
 
     const hw  = d.hw  || {};
-    const hbe = d.hb_encoders || {};
-    const hbVer = d.versions?.handbrake;
+    const ffe = d.ff_encoders || {};
+    const ffVer = d.versions?.ffmpeg;
     const fpVer = d.versions?.ffprobe;
 
     const versions = [
-        row('HandBrakeCLI', hbVer ? ok(escHtml(hbVer)) : warn('Not found', 'install HandBrakeCLI and ensure it is in PATH')),
-        row('ffprobe',      fpVer ? ok(escHtml(fpVer))  : warn('Not found')),
+        row('ffmpeg',  ffVer ? ok(escHtml(ffVer)) : warn('Not found')),
+        row('ffprobe', fpVer ? ok(escHtml(fpVer)) : warn('Not found')),
     ].join('');
 
     const hwRows = [
-        row('Intel QSV / VAAPI', hw.qsv  ? ok('Present') : warn('Not detected')),
+        row('Intel QSV / VAAPI', hw.vaapi ? ok('Present') : warn('Not detected')),
         row('NVIDIA NVENC',      hw.nvenc ? ok('Present') : warn('Not detected')),
-        row('AMD VCE / VCN',     hw.amd   ? ok('Present') : warn('Not detected')),
+        row('AMD VAAPI',         hw.amd   ? ok('Present') : warn('Not detected')),
     ].join('');
 
-    const encRow = (label, hwKey, hbKey) => {
-        const hwOk = hw[hwKey], hbOk = hbe[hbKey];
-        let content;
-        if (!hbVer) {
-            content = warn('n/a', 'HandBrakeCLI not installed');
-        } else if (hbOk && hwOk) {
-            content = ok('Ready', 'compiled in · hardware present');
-        } else if (hbOk && !hwOk) {
-            content = `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`;
-        } else if (!hbOk && hwOk) {
-            content = warn('Not compiled in', 'hardware present but this HandBrakeCLI build lacks support');
-        } else {
-            content = warn('Not available');
-        }
-        return row(label, content);
+    const ffEncRow = (label, hwKey, ffKey) => {
+        const hwOk = hw[hwKey], ffOk = ffe[ffKey];
+        if (ffOk && hwOk) return row(label, ok('Ready', 'compiled in · hardware present'));
+        if (ffOk && !hwOk) return row(label, `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`);
+        if (!ffOk && hwOk) return row(label, warn('Not compiled in', 'hardware present but this ffmpeg build lacks support'));
+        return row(label, warn('Not available'));
     };
     const hbEncRows = [
-        encRow('Intel QSV H.265',   'qsv',   'qsv'),
-        encRow('NVIDIA NVENC H.265','nvenc',  'nvenc'),
-        encRow('AMD VCE H.265',     'amd',   'amd'),
+        ffEncRow('hevc_vaapi (Intel/AMD)', 'vaapi', 'vaapi'),
+        ffEncRow('hevc_nvenc (NVIDIA)',    'nvenc',  'nvenc'),
+        row('libx265 (software)',          ffe.libx265 ? ok('Available') : warn('Not compiled in')),
     ].join('');
 
     const drv = d.drivers || {};
@@ -662,7 +683,7 @@ function renderSysinfo(d) {
     return sec('Components', versions)
          + sec('Hardware Detected', hwRows)
          + sec('Media Drivers', driverRows)
-         + sec('HandBrakeCLI Encoder Support', hbEncRows);
+         + sec('ffmpeg Encoder Support', hbEncRows);
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────

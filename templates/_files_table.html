@@ -22,18 +22,19 @@
     </span>
     <span class="file-meta">
         <span class="tag {{ file.ext_class }}">{{ file.ext }}</span>
-        <span class="tag size">{{ file.human_size }}</span>
+        <span class="tag {{ file.size_class }}">{{ file.human_size }}</span>
         {% if file.video_codec and file.video_codec != 'N/A' %}
             <span class="tag {{ file.codec_class }}">{{ file.video_codec }}</span>
             {% if file.width and file.height %}
             <span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>
             {% endif %}
+            <span class="tag {{ file.hdr_class }}">{{ file.hdr_type or 'SDR' }}</span>
         {% endif %}
         {% if file.audio_codec and file.audio_codec != 'N/A' %}
-        <span class="tag">{{ file.audio_codec }}</span>
+        <span class="tag audio">{{ file.audio_codec }}</span>
         {% endif %}
         {% if file.duration_label %}
-        <span class="tag">{{ file.duration_label }}</span>
+        <span class="tag duration">{{ file.duration_label }}</span>
         {% endif %}
     </span>
     <span class="file-search-cell">

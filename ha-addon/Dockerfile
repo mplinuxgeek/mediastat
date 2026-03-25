@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:trixie
 FROM ${BUILD_FROM}
 
 # The HA base image only has 'main' in its apt sources.
@@ -6,18 +6,20 @@ FROM ${BUILD_FROM}
 RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
         /etc/apt/sources.list.d/debian.sources
 
-# Install system dependencies + HandBrakeCLI.
-# The standard Debian handbrake-cli has QSV compiled in; it just needs the
-# Intel VA-API driver (non-free-firmware) present at runtime to use it.
+# ffmpeg handles all encoding (hevc_qsv via Intel oneVPL, hevc_vaapi fallback,
+# or libx265 for software).
+# libmfx-gen1  — oneVPL GPU runtime for Gen 12+ (Alder Lake / Raptor Lake)
+# libmfx1      — legacy Media SDK runtime for Gen 6–11 (Skylake–Rocket Lake)
+# libvpl2      — oneVPL dispatcher that links ffmpeg to whichever runtime is present
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
         ffmpeg \
-        handbrake-cli \
         vainfo \
         libva-drm2 \
         libvpl2 \
+        libmfx-gen1.2 \
         intel-media-va-driver-non-free \
         i965-va-driver-shaders \
         mesa-va-drivers \
@@ -42,7 +44,7 @@ COPY templates/ templates/
 RUN mkdir -p /data
 
 # run.sh is the entrypoint for HA add-ons
-COPY run.sh /run.sh
+COPY ha-addon/run.sh /run.sh
 RUN chmod +x /run.sh
 
 CMD ["/run.sh"]
