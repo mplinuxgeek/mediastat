@@ -279,6 +279,12 @@ def _hdr_type_from_stream(video: dict) -> str:
         return "HDR"
     if ct == "arib-std-b67":
         return "HLG"
+    # Fall back to checking primaries/colorspace — some encodes omit the
+    # transfer tag but still signal bt2020 wide-gamut content.
+    cp = video.get("color_primaries") or ""
+    cs = video.get("color_space") or ""
+    if "bt2020" in cp or "bt2020" in cs:
+        return "HDR"
     return "SDR"
 
 
@@ -287,7 +293,7 @@ async def run_ffprobe(path: Path) -> dict:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=codec_name,codec_type,width,height,color_transfer,profile:format=duration",
+            "stream=codec_name,codec_type,width,height,color_transfer,color_primaries,color_space,profile:format=duration",
             "-of", "json", str(path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

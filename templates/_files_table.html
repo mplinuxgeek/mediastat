@@ -13,7 +13,8 @@
      data-ext="{{ file.ext }}"
      data-needs-transcode="{{ 'true' if file.needs_transcode else 'false' }}"
      data-audio="{{ (file.audio_codec or '') | lower }}"
-     data-duration="{{ file.duration_sec or file.duration_min or '' }}">
+     data-duration="{{ file.duration_sec or file.duration_min or '' }}"
+     data-hdr="{{ file.hdr_type or 'SDR' }}">
     <span class="batch-checkbox-cell">
         <input type="checkbox" class="batch-cb" onclick="event.stopPropagation();updateBatchFab()">
     </span>

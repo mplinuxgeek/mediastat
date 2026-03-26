@@ -805,6 +805,8 @@
         }
         .batch-fab:hover { background: #79b8ff; }
         .batch-fab.visible { display: inline-flex; }
+        .batch-fab.danger { background: var(--red); right: auto; left: 24px; }
+        .batch-fab.danger:hover { background: #ff8080; }
         .btn.batch-active { color: var(--accent); border-color: var(--accent); }
 
         /* ── Bookmarks ───────────────────────────────────────────── */
@@ -949,6 +951,9 @@
         <span class="ctrl-sep">│</span>
         <span class="sort-label">audio:</span>
         <span id="filter-audio"></span>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">hdr:</span>
+        <span id="filter-hdr"></span>
     </div>
     {% if error %}
     <div class="error-banner">Path not found: {{ error }}</div>
@@ -1180,6 +1185,23 @@
     <button id="batch-fab" class="batch-fab" onclick="startBatchEncode()">
         ⚙ Encode <span id="batch-fab-count">0</span> selected
     </button>
+    <button id="batch-delete-fab" class="batch-fab danger" onclick="startBatchDelete()">
+        ✕ Delete <span id="batch-delete-fab-count">0</span> selected
+    </button>
+
+    <div id="batch-delete-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeBatchDeleteModal()">
+        <div class="modal">
+            <div class="modal-title">Delete <span id="batch-delete-count"></span> files?</div>
+            <div class="modal-filename" id="batch-delete-names" style="max-height:120px;overflow-y:auto;font-size:12px;line-height:1.8"></div>
+            <div class="modal-hint">Type <code>ok</code> to confirm</div>
+            <input id="batch-delete-input" class="modal-input" type="text" autocomplete="off" spellcheck="false"
+                   oninput="document.getElementById('batch-delete-confirm').disabled = this.value.trim().toLowerCase() !== 'ok'">
+            <div class="modal-actions">
+                <button class="btn" onclick="closeBatchDeleteModal()">Cancel</button>
+                <button id="batch-delete-confirm" class="btn btn-danger" disabled onclick="confirmBatchDelete()">Delete all</button>
+            </div>
+        </div>
+    </div>
 
     <div id="recent-modal" class="recent-overlay" style="display:none" onclick="if(event.target===this)closeRecentModal()">
         <div class="recent-panel">
@@ -1333,7 +1355,9 @@
     function updateBatchFab() {
         const count = document.querySelectorAll('.batch-cb:checked').length;
         document.getElementById('batch-fab-count').textContent = count;
+        document.getElementById('batch-delete-fab-count').textContent = count;
         document.getElementById('batch-fab').classList.toggle('visible', count > 0);
+        document.getElementById('batch-delete-fab').classList.toggle('visible', count > 0);
     }
 
     async function startBatchEncode() {
@@ -1383,6 +1407,49 @@
             toggleBatchMode();
             showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 6000);
         };
+    }
+
+    // ── Bulk delete ──────────────────────────────────────────────
+    let _batchDeleteRows = [];
+
+    function startBatchDelete() {
+        _batchDeleteRows = [...document.querySelectorAll('.batch-cb:checked')]
+            .map(cb => cb.closest('.file-entry')).filter(Boolean);
+        if (!_batchDeleteRows.length) return;
+        document.getElementById('batch-delete-count').textContent =
+            `${_batchDeleteRows.length} file${_batchDeleteRows.length !== 1 ? 's' : ''}`;
+        document.getElementById('batch-delete-names').innerHTML =
+            _batchDeleteRows.map(r => `<div>${escHtml(r.dataset.path.split('/').pop())}</div>`).join('');
+        document.getElementById('batch-delete-input').value = '';
+        document.getElementById('batch-delete-confirm').disabled = true;
+        document.getElementById('batch-delete-modal').style.display = 'flex';
+        document.getElementById('batch-delete-input').focus();
+    }
+
+    function closeBatchDeleteModal() {
+        document.getElementById('batch-delete-modal').style.display = 'none';
+        document.getElementById('batch-delete-input').value = '';
+        _batchDeleteRows = [];
+    }
+
+    async function confirmBatchDelete() {
+        if (!_batchDeleteRows.length) return;
+        const rows = [..._batchDeleteRows];
+        closeBatchDeleteModal();
+        const results = await Promise.all(rows.map(row =>
+            fetch('/file?path=' + encodeURIComponent(row.dataset.path), {
+                method: 'DELETE',
+                headers: { 'X-Delete-Token': DELETE_TOKEN },
+            }).then(r => r.ok).catch(() => false)
+        ));
+        results.forEach((ok, i) => { if (ok) rows[i].remove(); });
+        const deleted = results.filter(Boolean).length;
+        const failed  = results.length - deleted;
+        toggleBatchMode();
+        showToast(
+            deleted ? `${deleted} file${deleted !== 1 ? 's' : ''} deleted${failed ? ` · ${failed} failed` : ''}` : `Delete failed`,
+            deleted ? 'success' : 'error', 5000
+        );
     }
 
     // ── Folder encode ────────────────────────────────────────────
@@ -1851,7 +1918,7 @@
                     ?.classList.add('active');
         });
         // Dynamic filter groups — buttons are built later; store pending vals and apply after rebuild
-        ['ext', 'audio'].forEach(group => {
+        ['ext', 'audio', 'hdr'].forEach(group => {
             const vals = params.getAll(group);
             if (vals.length) _pendingRestoreFilters[group] = vals;
         });
@@ -1948,6 +2015,7 @@
         const codecs = new Set();
         const audios = new Set();
         const exts   = new Set();
+        const hdrs   = new Set();
         entries.forEach(e => {
             const vc = (e.dataset.vcodec || '').toLowerCase().trim();
             if (vc && vc !== 'n/a') codecs.add(_normalizeCodecVal(vc));
@@ -1955,11 +2023,16 @@
             if (ac && ac !== 'n/a') audios.add(ac);
             const ex = (e.dataset.ext || '').toLowerCase().trim();
             if (ex) exts.add(ex);
+            const hdr = (e.dataset.hdr || '').trim();
+            if (hdr) hdrs.add(hdr);
         });
 
         _rebuildGroup('filter-codecs', 'codec', [...codecs].sort(), v => v);
         _rebuildGroup('filter-audio',  'audio', [...audios].sort(), v => v);
         _rebuildGroup('filter-ext',    'ext',   [...exts].sort(),   v => v.replace(/^\./, ''));
+        // HDR types in logical order rather than alphabetical
+        const _HDR_ORDER = ['DV', 'HDR', 'HLG', 'SDR'];
+        _rebuildGroup('filter-hdr', 'hdr', [...hdrs].sort((a, b) => _HDR_ORDER.indexOf(a) - _HDR_ORDER.indexOf(b)), v => v);
     }
 
     function _rebuildGroup(containerId, group, vals, labelFn) {
@@ -1981,6 +2054,7 @@
         const activeRes    = _activeFilters('res');
         const activeExt    = _activeFilters('ext');
         const activeAudio  = _activeFilters('audio');
+        const activeHdr    = _activeFilters('hdr');
         document.querySelectorAll('.files-table > .file-entry').forEach(e => {
             if (term && !(e.dataset.name || '').includes(term)) { e.style.display = 'none'; return; }
             if (activeCodecs.length > 0 && !activeCodecs.some(v => codecMatches(e.dataset.vcodec || '', v))) { e.style.display = 'none'; return; }
@@ -1989,6 +2063,7 @@
             }
             if (activeExt.length > 0 && !activeExt.includes(e.dataset.ext || '')) { e.style.display = 'none'; return; }
             if (activeAudio.length > 0 && !activeAudio.includes(e.dataset.audio || '')) { e.style.display = 'none'; return; }
+            if (activeHdr.length > 0 && !activeHdr.includes(e.dataset.hdr || '')) { e.style.display = 'none'; return; }
             e.style.display = '';
         });
         document.querySelectorAll('.dirs-container > .dir-entry')
