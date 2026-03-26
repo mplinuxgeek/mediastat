@@ -253,6 +253,38 @@
         }
 
         /* ── Sort / filter bar ──────────────────────────────────── */
+        /* ── Folder header ───────────────────────────────────────── */
+        .folder-header {
+            display: flex; align-items: baseline; gap: 12px;
+            padding: 8px 14px 7px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .folder-header-name {
+            font-size: 14px; font-weight: 600; color: var(--text);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .folder-header-usage {
+            display: flex; align-items: center; gap: 8px;
+            flex-shrink: 0; flex-wrap: wrap;
+        }
+        .fh-bar-wrap {
+            display: flex; align-items: center; gap: 6px;
+        }
+        .fh-bar {
+            width: 120px; height: 5px; border-radius: 3px;
+            background: var(--surface2); overflow: hidden; flex-shrink: 0;
+        }
+        .fh-bar-fill {
+            height: 100%; border-radius: 3px;
+            background: var(--accent); transition: width 0.3s;
+        }
+        .fh-bar-fill.warn  { background: #e3b341; }
+        .fh-bar-fill.crit  { background: #f47474; }
+        .fh-stat { font-size: 12px; color: var(--muted); white-space: nowrap; }
+        .fh-stat b { color: var(--text); font-weight: 500; }
+        .fh-sep { color: var(--border); font-size: 12px; }
+
         .sort-bar {
             display: flex;
             align-items: center;
@@ -897,6 +929,11 @@
     <div class="error-banner">Path not found: {{ error }}</div>
     {% endif %}
 
+    <div id="folder-header" class="folder-header">
+        <span id="folder-header-name" class="folder-header-name"></span>
+        <span id="folder-header-usage" class="folder-header-usage"></span>
+    </div>
+
     <main id="root-content"
           hx-get="/dir?path={{ media_root | pathquote }}"
           hx-trigger="load"
@@ -1038,13 +1075,21 @@
                 </select>
                 <span class="encode-field-hint">Height scaled automatically · aspect ratio preserved</span>
 
+                <span class="encode-field-label">Codec</span>
+                <select id="enc-codec" class="modal-input">
+                    <option value="hevc">H.265 / HEVC</option>
+                    <option value="h264">H.264 / AVC</option>
+                    <option value="av1">AV1</option>
+                </select>
+                <span></span>
+
                 <span class="encode-field-label">GPU encoder</span>
                 <select id="enc-gpu" class="modal-input">
                     <option value="auto">Auto (best available)</option>
                     <option value="intel">Intel QSV / VAAPI</option>
                     <option value="nvidia">NVIDIA NVENC</option>
                     <option value="amd">AMD VCE / VCN</option>
-                    <option value="none">Software x265</option>
+                    <option value="none">Software</option>
                 </select>
                 <span></span>
             </div>
@@ -1245,6 +1290,7 @@
         const config = {
             qp:      parseInt(document.getElementById('enc-qp').value, 10),
             preset:  document.getElementById('enc-preset').value,
+            codec:   document.getElementById('enc-codec').value,
             gpu:     document.getElementById('enc-gpu').value,
             format:  document.getElementById('enc-format').value,
             denoise: document.getElementById('enc-denoise').value || null,
@@ -1317,7 +1363,8 @@
             const batchConfig = {
                 qp:      parseInt(document.getElementById('enc-qp').value, 10),
                 preset:  document.getElementById('enc-preset').value,
-                gpu:     document.getElementById('enc-gpu').value,
+                codec:   document.getElementById('enc-codec').value,
+            gpu:     document.getElementById('enc-gpu').value,
                 format:  document.getElementById('enc-format').value,
                 denoise: document.getElementById('enc-denoise').value || null,
                 crop:    document.getElementById('enc-crop').checked,
@@ -1415,7 +1462,8 @@
             const config = {
                 qp:      parseInt(document.getElementById('enc-qp').value, 10),
                 preset:  document.getElementById('enc-preset').value,
-                gpu:     document.getElementById('enc-gpu').value,
+                codec:   document.getElementById('enc-codec').value,
+            gpu:     document.getElementById('enc-gpu').value,
                 format:  document.getElementById('enc-format').value,
                 denoise: document.getElementById('enc-denoise').value || null,
                 crop:    document.getElementById('enc-crop').checked,
@@ -1845,6 +1893,34 @@
     document.querySelectorAll('.files-scanning').forEach(startFileScan);
     document.querySelectorAll('.files-checking').forEach(startDirCheck);
     loadDirSizes(document);
+    loadFolderHeader();
+
+    // ── Folder header ─────────────────────────────────────────────
+    async function loadFolderHeader() {
+        const root = {{ media_root | tojson }};
+        const nameEl  = document.getElementById('folder-header-name');
+        const usageEl = document.getElementById('folder-header-usage');
+        nameEl.textContent = root.split('/').filter(Boolean).pop() || root;
+        try {
+            const resp = await fetch('/disk-usage?path=' + encodeURIComponent(root));
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const d = await resp.json();
+            const pct = d.used_pct;
+            const fillClass = pct >= 90 ? 'fh-bar-fill crit' : pct >= 75 ? 'fh-bar-fill warn' : 'fh-bar-fill';
+            usageEl.innerHTML = `
+                <span class="fh-stat"><b>${escHtml(d.used_human)}</b> used (${pct}%)</span>
+                <span class="fh-sep">·</span>
+                <div class="fh-bar-wrap">
+                    <div class="fh-bar"><div class="${fillClass}" style="width:${pct}%"></div></div>
+                </div>
+                <span class="fh-sep">·</span>
+                <span class="fh-stat"><b>${escHtml(d.free_human)}</b> free (${d.free_pct}%)</span>
+                <span class="fh-sep">of</span>
+                <span class="fh-stat"><b>${escHtml(d.total_human)}</b></span>`;
+        } catch (e) {
+            usageEl.innerHTML = `<span class="fh-stat" style="color:var(--muted)">${escHtml(e.message)}</span>`;
+        }
+    }
 
     // Watch for placeholders and new dir-blocks injected by HTMX
     const _sortBar = document.getElementById('global-sort-bar');

@@ -597,6 +597,30 @@ async def expand_dir(request: Request, path: str = Query(...)):
     })
 
 
+@app.get("/disk-usage")
+async def disk_usage_endpoint(path: str = Query(...)):
+    """Return filesystem disk usage for the volume containing `path`."""
+    dir_path = safe_path(path)
+    if not dir_path.exists():
+        raise HTTPException(status_code=404)
+    try:
+        st = await asyncio.to_thread(shutil.disk_usage, str(dir_path))
+        return {
+            "path":       str(dir_path),
+            "name":       dir_path.name or str(dir_path),
+            "total":      st.total,
+            "used":       st.used,
+            "free":       st.free,
+            "used_pct":   round(st.used / st.total * 100, 1) if st.total else 0,
+            "free_pct":   round(st.free / st.total * 100, 1) if st.total else 0,
+            "total_human": human_size(st.total),
+            "used_human":  human_size(st.used),
+            "free_human":  human_size(st.free),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/dir-size")
 async def dir_size(path: str = Query(...)):
     """Returns the total size of a directory (runs du). Used for lazy size loading."""
