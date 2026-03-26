@@ -1494,9 +1494,29 @@ async def _run_encode_job(job_id: str) -> None:
 
         crop_filter: Optional[str] = None
         if job.config.get("crop"):
-            crop_filter = await _detect_crop(input_path, duration_sec)
-            if crop_filter:
-                log.info("Encode %s: cropdetect → crop=%s", job_id[:8], crop_filter)
+            raw_crop = await _detect_crop(input_path, duration_sec)
+            if raw_crop:
+                # Validate crop against stored (not display) dimensions.
+                # cropdetect runs on decoded/scaled frames so it may return
+                # display dimensions, but the crop filter works on stored pixels.
+                # If the crop values exceed stored dimensions (anamorphic content)
+                # or are a no-op, discard them to avoid EINVAL from ffmpeg.
+                src_w = vst.get("width") or 0
+                src_h = vst.get("height") or 0
+                try:
+                    cw, ch, cx, cy = (int(v) for v in raw_crop.split(":"))
+                    if src_w and src_h and (cw + cx > src_w or ch + cy > src_h):
+                        log.warning(
+                            "Encode %s: cropdetect %s exceeds stored dimensions "
+                            "%dx%d — skipping crop", job_id[:8], raw_crop, src_w, src_h,
+                        )
+                    elif src_w and src_h and cw == src_w and ch == src_h and cx == 0 and cy == 0:
+                        log.info("Encode %s: cropdetect %s is a no-op — skipping", job_id[:8], raw_crop)
+                    else:
+                        crop_filter = raw_crop
+                        log.info("Encode %s: cropdetect → crop=%s", job_id[:8], crop_filter)
+                except (ValueError, TypeError):
+                    log.warning("Encode %s: could not parse cropdetect value %r", job_id[:8], raw_crop)
             else:
                 log.info("Encode %s: cropdetect found no crop", job_id[:8])
 
