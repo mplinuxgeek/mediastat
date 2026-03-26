@@ -1,6 +1,6 @@
 ---
 name: "MediaStat"
-version: "1.0.21"
+version: "1.0.22"
 slug: "mediastat"
 description: "Media browser, health checker and HandBrake transcoder for your library"
 url: "https://github.com/mplinuxgeek/mediastat"
@@ -44,6 +44,13 @@ panel_title: "MediaStat"
 map:
   - media:rw    # /media  — HA media directory (movies, TV, etc.)
   - share:ro    # /share  — optional, for media on network shares mounted by HA
+
+# Full access is required for GPU hardware encoding (Intel QSV / VA-API / NVENC).
+# Without it the HA supervisor's seccomp profile blocks the DRM ioctls that
+# libva needs to communicate with the GPU driver, causing "No VA display found"
+# errors even when /dev/dri is mapped and the iHD driver is installed.
+# On machines without a GPU this has no practical effect.
+full_access: true
 
 # GPU passthrough — DRI render nodes for Intel QSV / AMD VA-API.
 # HA supervisor silently skips any device that doesn't exist on the host,
