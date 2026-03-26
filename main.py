@@ -1283,6 +1283,7 @@ def _build_ffmpeg_cmd(
     color_primaries: str = "", transfer_characteristics: str = "",
     color_space: str = "", color_range: str = "",
     crop_filter: Optional[str] = None, a_streams: Optional[list] = None,
+    source_fps: Optional[float] = None,
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
     codec    = config.get("codec", "hevc")
@@ -1343,15 +1344,16 @@ def _build_ffmpeg_cmd(
             vf.append(f"crop={crop_filter}")
         if denoise_params:
             vf.append(f"hqdn3d={denoise_params}")
+        if is_av1 and source_fps:
+            # QSV AV1 runtime rejects fractional framerates (e.g. 23.976).
+            # Normalise to the nearest integer fps before hwupload.
+            vf.append(f"fps={round(source_fps)}")
         vf.append(f"format={pix_fmt}")
         if width:
             vf.append(f"scale={int(width)}:-2")
         vf.append("hwupload=extra_hw_frames=64")
         cmd += ["-vf", ",".join(vf)]
         cmd += ["-c:v", encoder, "-global_quality", str(qp), "-preset", preset]
-        if is_av1:
-            # QSV AV1 rejects variable/fractional framerates; force CFR.
-            cmd += ["-fps_mode", "cfr"]
         if is_10bit and not is_av1:
             cmd += ["-profile:v", "main10"]
         cmd += color_meta
@@ -1500,6 +1502,7 @@ async def _run_encode_job(job_id: str) -> None:
         is_hdr = False
         is_dv  = False
         duration_sec: Optional[float] = None
+        source_fps: Optional[float] = None
         cp = tc = cs = cr = ""
         try:
             async with _PROBE_SEM:
@@ -1541,6 +1544,11 @@ async def _run_encode_job(job_id: str) -> None:
             try:
                 duration_sec = float(probe.get("format", {}).get("duration") or 0) or None
             except (TypeError, ValueError):
+                pass
+            try:
+                _fn, _fd = (vst.get("r_frame_rate") or "0/1").split("/")
+                source_fps = round(int(_fn) / max(int(_fd), 1), 3) or None
+            except (ValueError, ZeroDivisionError):
                 pass
             job.input_media_info = {
                 "video_codec": vst.get("codec_name", ""),
@@ -1585,7 +1593,7 @@ async def _run_encode_job(job_id: str) -> None:
         cmd, encoder = _build_ffmpeg_cmd(
             job.input_path, job.output_path, job.config, _hw_accel_info,
             bit_depth, is_hdr, cp, tc, cs, cr,
-            crop_filter=crop_filter, a_streams=a_streams,
+            crop_filter=crop_filter, a_streams=a_streams, source_fps=source_fps,
         )
         job.encoder = encoder
         try:
