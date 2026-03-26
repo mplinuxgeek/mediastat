@@ -1072,7 +1072,7 @@ async def _load_encode_jobs() -> None:
 
 def _detect_hw_accel_sync() -> dict:
     import glob as _glob
-    result = {"qsv": False, "nvenc": False, "nvenc_cuvid": False, "amd": False, "vaapi": False, "dri_device": ""}
+    result = {"qsv": False, "nvenc": False, "nvenc_cuvid": False, "amd": False, "vaapi": False, "av1_hw": False, "dri_device": ""}
     if shutil.which("nvidia-smi"):
         try:
             r = subprocess.run(
@@ -1117,6 +1117,25 @@ def _detect_hw_accel_sync() -> dict:
                             result["vaapi"] = True
                             result["dri_device"] = dev
                             log.info("QSV probe    : hevc_qsv functional (%s)", dev)
+                            # Probe AV1 QSV — only available on Arc / Meteor Lake+;
+                            # Alder/Raptor Lake iGPUs support AV1 decode but not encode.
+                            try:
+                                r2 = subprocess.run(
+                                    ["ffmpeg", "-v", "error",
+                                     "-init_hw_device", f"vaapi=va:{dev}",
+                                     "-init_hw_device", "qsv=hw@va",
+                                     "-filter_hw_device", "hw",
+                                     "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=24",
+                                     "-vframes", "1",
+                                     "-vf", "format=nv12,hwupload=extra_hw_frames=64",
+                                     "-c:v", "av1_qsv", "-f", "null", "-"],
+                                    capture_output=True, timeout=15,
+                                    env=_libva_env,
+                                )
+                                result["av1_hw"] = r2.returncode == 0
+                                log.info("AV1 QSV probe: %s", "supported" if result["av1_hw"] else "not supported (hw encode unavailable — will use libsvtav1)")
+                            except Exception as e:
+                                log.warning("AV1 QSV probe: failed (%s)", e)
                         else:
                             err = (r.stderr or b"").decode(errors="replace").strip().splitlines()
                             log.warning("QSV probe    : hevc_qsv unavailable — testing hevc_vaapi")
@@ -1224,17 +1243,25 @@ async def _encode_worker() -> None:
 
 def _choose_encoder_name(hw: dict, gpu_pref: str, codec: str = "hevc") -> str:
     """Return ffmpeg encoder name based on available hardware, user preference, and codec."""
-    _SW = {"hevc": "libx265", "h264": "libx264", "av1": "libsvtav1"}
-    _QSV = {"hevc": "hevc_qsv", "h264": "h264_qsv", "av1": "av1_qsv"}
-    _NVENC = {"hevc": "hevc_nvenc", "h264": "h264_nvenc", "av1": "av1_nvenc"}
-    _VAAPI = {"hevc": "hevc_vaapi", "h264": "h264_vaapi", "av1": "hevc_vaapi"}  # AV1 VAAPI rare, fall back to hevc
+    _SW    = {"hevc": "libx265",    "h264": "libx264",    "av1": "libsvtav1"}
+    _QSV   = {"hevc": "hevc_qsv",  "h264": "h264_qsv",  "av1": "av1_qsv"}
+    _NVENC = {"hevc": "hevc_nvenc","h264": "h264_nvenc", "av1": "av1_nvenc"}
+    _VAAPI = {"hevc": "hevc_vaapi","h264": "h264_vaapi", "av1": "hevc_vaapi"}
     sw = _SW.get(codec, "libx265")
+
+    def _qsv(c):
+        # AV1 QSV requires hardware AV1 encode support (Arc / Meteor Lake+).
+        # Alder/Raptor Lake iGPUs can only decode AV1 — fall back to libsvtav1.
+        if c == "av1" and not hw.get("av1_hw"):
+            return sw
+        return _QSV.get(c, "hevc_qsv")
+
     if gpu_pref == "none":   return sw
-    if gpu_pref == "intel":  return _QSV.get(codec, "hevc_qsv")   if hw.get("qsv")   else sw
+    if gpu_pref == "intel":  return _qsv(codec)  if hw.get("qsv")   else sw
     if gpu_pref == "nvidia": return _NVENC.get(codec, "hevc_nvenc") if hw.get("nvenc") else sw
     if gpu_pref == "amd":    return _VAAPI.get(codec, "hevc_vaapi") if hw.get("amd")   else sw
     # Auto: prefer QSV (Intel) > NVENC > VAAPI (AMD) > software
-    if hw.get("qsv"):    return _QSV.get(codec, "hevc_qsv")
+    if hw.get("qsv"):    return _qsv(codec)
     if hw.get("nvenc"):  return _NVENC.get(codec, "hevc_nvenc")
     if hw.get("vaapi"):  return _VAAPI.get(codec, "hevc_vaapi")
     return sw
@@ -1275,9 +1302,6 @@ def _build_ffmpeg_cmd(
                          "quality": "p4", "archive": "p6"}
     preset      = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
     nvenc_preset = _NVENC_PRESET_MAP.get(config.get("preset", "fast"), "p2")
-    # av1_qsv only supports up to 'medium'; slower presets are rejected at runtime.
-    if "av1_qsv" in encoder and preset in ("slow", "slower", "veryslow"):
-        preset = "medium"
 
     cmd = ["ffmpeg", "-y",
            "-analyzeduration", "100M", "-probesize", "100M"]
