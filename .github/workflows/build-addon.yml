@@ -33,7 +33,7 @@ jobs:
       - name: Sync app sources into ha-addon/
         run: |
           cp main.py requirements.txt ha-addon/
-          cp -r templates ha-addon/templates
+          cp -r templates ha-addon/
 
       - name: Set up QEMU (for cross-arch builds)
         uses: docker/setup-qemu-action@v3.6.0
@@ -60,7 +60,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6.15.0
         with:
-          context: ha-addon
+          context: .
+          file: ha-addon/Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
           build-args: |
