@@ -613,44 +613,32 @@
         .player-close:hover { color: var(--text); }
 
         /* ── Media info modal ────────────────────────────────────── */
-        #mediainfo-modal { background: rgba(0,0,0,0.82); }
-        .mediainfo-inner { max-width: 640px; width: 96vw; }
-        .mediainfo-body {
-            padding: 16px 20px 20px;
-            overflow-y: auto;
-            max-height: calc(90vh - 44px);
-            font-size: 15px;
+        .mediainfo-modal {
+            max-width: min(640px, 95vw); width: min(640px, 95vw);
+            max-height: 80vh; display: flex; flex-direction: column;
         }
-        .mi-section { margin-bottom: 18px; }
+        .mediainfo-modal-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 14px; flex-shrink: 0;
+        }
+        .mediainfo-modal-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 10px; }
+        .mediainfo-body { overflow-y: auto; flex: 1; padding: 2px 0; font-size: 13px; }
+        .mi-section { margin-bottom: 14px; }
         .mi-section:last-child { margin-bottom: 0; }
         .mi-section-title {
-            font-size: 12px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--muted);
-            margin-bottom: 8px;
-            padding-bottom: 4px;
-            border-bottom: 1px solid var(--border);
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px;
         }
-        .mi-grid {
-            display: grid;
-            grid-template-columns: 160px 1fr;
-            gap: 5px 12px;
-        }
-        .mi-key   { color: var(--muted); white-space: nowrap; }
-        .mi-val   { color: var(--text);  word-break: break-all; }
+        .mi-grid { display: flex; flex-direction: column; gap: 4px; }
+        .mi-row { display: flex; align-items: baseline; gap: 10px; }
+        .mi-key { color: var(--muted); width: 130px; flex-shrink: 0; }
+        .mi-val { color: var(--text); word-break: break-word; }
         .mi-track-sep { margin: 8px 0 6px; border: none; border-top: 1px dashed var(--border); }
         .mi-badge {
-            display: inline-block;
-            font-size: 11px;
-            padding: 1px 6px;
-            border-radius: 4px;
-            border: 1px solid var(--border);
-            background: var(--surface2);
-            color: var(--muted);
-            margin-left: 4px;
-            vertical-align: middle;
+            display: inline-block; font-size: 11px; padding: 1px 6px;
+            border-radius: 4px; border: 1px solid var(--border);
+            background: var(--surface2); color: var(--muted);
+            margin-left: 4px; vertical-align: middle;
         }
         .mi-badge.hdr { color: #e3b341; border-color: #614a14; background: rgba(227,179,65,0.08); }
 
@@ -809,68 +797,21 @@
         .batch-fab.danger:hover { background: #ff8080; }
         .btn.batch-active { color: var(--accent); border-color: var(--accent); }
 
-        /* ── Bookmarks ───────────────────────────────────────────── */
-        .bookmark-btn {
-            background: transparent; border: none;
-            color: var(--muted); cursor: pointer;
-            font-size: 14px; padding: 0 4px;
-            border-radius: 3px; font-family: inherit;
-            line-height: 1.6; opacity: 0;
-            transition: color 0.1s, opacity 0.1s;
-        }
-        details.dir-entry > summary:hover .bookmark-btn { opacity: 1; }
-        .bookmark-btn.bookmarked { color: var(--yellow); opacity: 1; }
-        .bookmarks-dropdown {
-            position: absolute; top: 100%; right: 0;
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: 6px; padding: 4px 0; z-index: 400;
-            min-width: 220px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-            display: none;
-        }
-        .bookmarks-dropdown.open { display: block; }
-        .bookmarks-wrapper { position: relative; }
-        .bookmark-item {
-            display: flex; align-items: center; gap: 8px;
-            padding: 5px 12px; font-size: 13px;
-            cursor: pointer; color: var(--text);
-        }
-        .bookmark-item:hover { background: var(--surface2); }
-        .bookmark-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .bookmark-item-del {
-            color: var(--muted); font-size: 12px; padding: 0 4px;
-            border: none; background: none; cursor: pointer; font-family: inherit;
-        }
-        .bookmark-item-del:hover { color: #f47474; }
-        .bookmarks-empty { padding: 8px 12px; font-size: 12px; color: var(--muted); font-style: italic; }
-
-        /* ── Recently added overlay ──────────────────────────────── */
-        .recent-overlay {
-            position: fixed; inset: 0;
-            background: rgba(0,0,0,0.7);
-            display: flex; align-items: center; justify-content: center;
-            z-index: 150;
-        }
-        .recent-panel {
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: 8px; width: min(700px, 95vw); max-height: 80vh;
-            display: flex; flex-direction: column; overflow: hidden;
-        }
-        .recent-header {
-            display: flex; align-items: center; gap: 10px;
-            padding: 14px 18px; border-bottom: 1px solid var(--border);
-            flex-shrink: 0;
-        }
-        .recent-title { font-weight: 600; font-size: 15px; flex: 1; }
-        .recent-body { overflow-y: auto; padding: 8px 0; flex: 1; }
-        .recent-row {
-            display: flex; align-items: center; gap: 10px;
-            padding: 4px 18px; font-size: 13px; cursor: default;
-        }
-        .recent-row:hover { background: var(--surface2); }
-        .recent-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .recent-dir  { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-        .recent-tags { display: flex; gap: 3px; flex-shrink: 0; }
-        .recent-empty { padding: 20px 18px; color: var(--muted); font-style: italic; font-size: 13px; }
+        /* ── System info modal ───────────────────────────────────── */
+        .sysinfo-modal { max-width: min(820px, 95vw); width: min(820px, 95vw); max-height: 80vh; display: flex; flex-direction: column; }
+        .sysinfo-modal-body { overflow-y: auto; flex: 1; padding: 4px 0; }
+        .si-section { margin-bottom: 14px; }
+        .si-section:last-child { margin-bottom: 0; }
+        .si-heading { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+        .si-row { display: flex; align-items: baseline; gap: 10px; font-size: 13px; margin-bottom: 4px; }
+        .si-row:last-child { margin-bottom: 0; }
+        .si-label { color: var(--muted); width: 200px; flex-shrink: 0; }
+        .si-val   { color: var(--text); }
+        .si-ok    { color: var(--green); }
+        .si-warn  { color: var(--muted); }
+        .si-err   { color: var(--red); }
+        .si-note  { font-size: 11px; color: var(--muted); margin-left: 6px; }
+        .si-loading { color: var(--muted); font-size: 12px; font-style: italic; }
 
         /* ── Health check modal ──────────────────────────────────── */
         .health-modal { max-width: min(700px, 95vw); width: min(700px, 95vw); max-height: 80vh; display: flex; flex-direction: column; }
@@ -889,6 +830,7 @@
         .health-issue-name { color: var(--text); margin-bottom: 2px; }
         .health-issue-tags { display: flex; gap: 6px; flex-wrap: wrap; }
         .health-issue-tag { font-size: 11px; color: #f47474; border: 1px solid #7d2020; border-radius: 3px; padding: 0 5px; }
+        .file-dir { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
         .health-ok { color: var(--green); font-size: 13px; padding: 12px 0; }
         .health-scanning { color: var(--muted); font-size: 12px; font-style: italic; }
     </style>
@@ -918,11 +860,6 @@
         <button class="btn" onclick="openSearchSettings()">⚙ searches</button>
         <button class="btn" onclick="openDupesModal()" title="Find likely duplicate files by name similarity">⊕ dupes</button>
         <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
-        <div class="bookmarks-wrapper">
-            <button class="btn" id="bookmarks-btn" onclick="toggleBookmarksDropdown()" title="Folder bookmarks">★ bookmarks</button>
-            <div id="bookmarks-dropdown" class="bookmarks-dropdown"></div>
-        </div>
-        <button class="btn" onclick="openRecentModal()" title="Recently added files">◷ recent</button>
         <button class="btn" onclick="openHealthModal()" title="Health check — scan all files for issues">✦ health</button>
         <button class="btn" id="batch-toggle-btn" onclick="toggleBatchMode()" title="Select files for batch encode">☐ select</button>
         <button class="btn"
@@ -930,6 +867,7 @@
             ↺ Rescan
         </button>
         <a href="{{ ingress_path }}/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none">⚙ Jobs</a>
+        <button class="btn" onclick="openSysInfoModal()" title="System information" style="margin-left:auto">⬡ sys info</button>
     </header>
     <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">
         <span class="sort-label">sort:</span>
@@ -967,10 +905,10 @@
         <div class="root-loading">Loading media library…</div>
     </main>
 
-    <div id="mediainfo-modal" class="player-overlay" style="display:none" onclick="if(event.target===this)closeMediaInfo()">
-        <div class="player-inner mediainfo-inner">
-            <div class="player-header">
-                <span id="mediainfo-title" class="player-title"></span>
+    <div id="mediainfo-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMediaInfo()">
+        <div class="modal mediainfo-modal">
+            <div class="mediainfo-modal-header">
+                <span id="mediainfo-title" class="mediainfo-modal-title"></span>
                 <button class="player-close" onclick="closeMediaInfo()">✕</button>
             </div>
             <div id="mediainfo-body" class="mediainfo-body">Loading…</div>
@@ -1203,13 +1141,16 @@
         </div>
     </div>
 
-    <div id="recent-modal" class="recent-overlay" style="display:none" onclick="if(event.target===this)closeRecentModal()">
-        <div class="recent-panel">
-            <div class="recent-header">
-                <span class="recent-title">◷ Recently Added</span>
-                <button class="player-close" onclick="closeRecentModal()">✕</button>
+    <div id="sysinfo-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeSysInfoModal()">
+        <div class="modal sysinfo-modal">
+            <div class="modal-title">⬡ System Info</div>
+            <div id="sysinfo-modal-body" class="sysinfo-modal-body">
+                <span class="si-loading">Loading…</span>
             </div>
-            <div id="recent-body" class="recent-body"></div>
+            <div class="modal-actions" style="margin-top:14px">
+                <button class="btn" onclick="exportSysInfoJson()">↓ Export JSON</button>
+                <button class="btn" onclick="closeSysInfoModal()">Close</button>
+            </div>
         </div>
     </div>
 
@@ -1322,7 +1263,7 @@
             });
             if (!resp.ok) {
                 const txt = await resp.text();
-                showToast('Encode failed: ' + txt, 'error');
+                showToast('Encode failed: ' + escHtml(txt), 'error');
                 return;
             }
             _encodingPaths.add(path);
@@ -1330,7 +1271,7 @@
             closeEncodeModal();
             showToast('Encode started · <a href="' + BASE_PATH + '/encode">View progress →</a>', 'success', 6000);
         } catch (e) {
-            showToast('Error: ' + e.message, 'error');
+            showToast('Error: ' + escHtml(e.message), 'error');
         } finally {
             btn.innerHTML = '⚙ Start Encode <span style="font-size:16px;line-height:1">›</span>';
             btn.disabled = false;
@@ -1494,7 +1435,7 @@
                 closeEncodeModal();
                 showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 7000);
             } catch (e) {
-                showToast('Error: ' + e.message, 'error');
+                showToast('Error: ' + escHtml(e.message), 'error');
                 confirmBtn.textContent = '⚙ Start Encode ›';
                 confirmBtn.disabled = false;
             }
@@ -1525,12 +1466,11 @@
         if (e.key === 'Escape') {
             const modals = ['player-modal','search-settings-modal','rename-modal',
                 'delete-modal','encode-modal','export-modal','dupes-modal',
-                'recent-modal','health-modal'];
+                'sysinfo-modal','health-modal'];
             for (const id of modals) {
                 const el = document.getElementById(id);
                 if (el && el.style.display !== 'none') { el.style.display = 'none'; return; }
             }
-            closeBookmarksDropdown();
             if (_batchMode) { toggleBatchMode(); return; }
         }
         if (e.key === 'j' || e.key === 'ArrowDown') {
@@ -1560,135 +1500,100 @@
         }
     });
 
-    // ── Folder bookmarks ──────────────────────────────────────────
-    const _BM_KEY = 'ms_bookmarks';
 
-    function _getBookmarks() {
-        try { return JSON.parse(localStorage.getItem(_BM_KEY)) || []; } catch { return []; }
-    }
-    function _saveBookmarks(bms) {
-        localStorage.setItem(_BM_KEY, JSON.stringify(bms));
-    }
+    // ── System info ───────────────────────────────────────────────
+    let _sysInfoLoaded = false;
+    let _sysInfoData = null;
 
-    function toggleBookmark(path, name) {
-        let bms = _getBookmarks();
-        const idx = bms.findIndex(b => b.path === path);
-        if (idx >= 0) bms.splice(idx, 1);
-        else bms.unshift({ name, path });
-        _saveBookmarks(bms);
-        // Update all bookmark buttons for this path
-        document.querySelectorAll(`.bookmark-btn[data-path="${CSS.escape(path)}"]`).forEach(btn => {
-            btn.classList.toggle('bookmarked', idx < 0);
-            btn.title = idx < 0 ? 'Remove bookmark' : 'Bookmark folder';
-        });
+    function openSysInfoModal() {
+        document.getElementById('sysinfo-modal').style.display = 'flex';
+        if (!_sysInfoLoaded) loadSysInfoModal();
     }
-
-    function toggleBookmarksDropdown() {
-        const dd = document.getElementById('bookmarks-dropdown');
-        const isOpen = dd.classList.contains('open');
-        if (isOpen) { closeBookmarksDropdown(); return; }
-        renderBookmarksDropdown();
-        dd.classList.add('open');
-        // Close on outside click
-        setTimeout(() => document.addEventListener('click', _closeBookmarksOnOutside, { once: true }), 0);
+    function closeSysInfoModal() {
+        document.getElementById('sysinfo-modal').style.display = 'none';
     }
-
-    function _closeBookmarksOnOutside(e) {
-        const wrapper = document.querySelector('.bookmarks-wrapper');
-        if (wrapper && !wrapper.contains(e.target)) closeBookmarksDropdown();
-    }
-
-    function closeBookmarksDropdown() {
-        document.getElementById('bookmarks-dropdown').classList.remove('open');
-    }
-
-    function renderBookmarksDropdown() {
-        const bms = _getBookmarks();
-        const dd = document.getElementById('bookmarks-dropdown');
-        if (!bms.length) {
-            dd.innerHTML = '<div class="bookmarks-empty">No bookmarks yet — click ☆ on a folder</div>';
-            return;
-        }
-        dd.innerHTML = bms.map(b => `
-            <div class="bookmark-item" onclick="navigateToBookmark('${escJs(b.path)}')">
-                <span class="bookmark-item-name" title="${escHtmlAttr(b.path)}">📁 ${escHtml(b.name)}</span>
-                <button class="bookmark-item-del" onclick="event.stopPropagation();removeBookmark('${escJs(b.path)}')" title="Remove">✕</button>
-            </div>`).join('');
-    }
-
-    function removeBookmark(path) {
-        let bms = _getBookmarks().filter(b => b.path !== path);
-        _saveBookmarks(bms);
-        renderBookmarksDropdown();
-        document.querySelectorAll(`.bookmark-btn[data-path="${CSS.escape(path)}"]`).forEach(btn => {
-            btn.classList.remove('bookmarked');
-        });
-    }
-
-    function navigateToBookmark(path) {
-        closeBookmarksDropdown();
-        // Expand the dir entry with this path
-        const entry = document.querySelector(`.dir-entry[data-dir-path="${CSS.escape(path)}"]`);
-        if (entry) {
-            entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            if (!entry.open) entry.open = true;
-        }
-    }
-
-    // Inject bookmark buttons into dir summaries (also called from MutationObserver for new nodes)
-    function _attachBookmarkButtons(e) {
-        const root = (e && e.detail && e.detail.target) || document;
-        root.querySelectorAll('.dir-entry').forEach(entry => {
-            const summary = entry.querySelector(':scope > summary');
-            if (!summary || summary.querySelector('.bookmark-btn')) return;
-            const path = entry.dataset.dirPath;
-            const name = summary.querySelector('.dir-name')?.textContent.replace(/\/$/, '') || path;
-            const bms  = _getBookmarks();
-            const isBookmarked = bms.some(b => b.path === path);
-            const btn = document.createElement('button');
-            btn.className = 'bookmark-btn' + (isBookmarked ? ' bookmarked' : '');
-            btn.title = isBookmarked ? 'Remove bookmark' : 'Bookmark folder';
-            btn.textContent = '★';
-            btn.dataset.path = path;
-            btn.onclick = ev => { ev.stopPropagation(); ev.preventDefault(); toggleBookmark(path, name); };
-            summary.insertBefore(btn, summary.querySelector('.htmx-indicator'));
-        });
-    }
-
-    // ── Recently added ────────────────────────────────────────────
-    async function openRecentModal() {
-        document.getElementById('recent-modal').style.display = 'flex';
-        const body = document.getElementById('recent-body');
-        body.innerHTML = '<div class="recent-empty">Loading…</div>';
+    async function loadSysInfoModal() {
+        if (_sysInfoLoaded) return;
+        _sysInfoLoaded = true;
+        const body = document.getElementById('sysinfo-modal-body');
+        body.innerHTML = '<span class="si-loading">Loading…</span>';
         try {
-            const resp = await fetch('/recently-added?limit=100');
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            const data = await resp.json();
-            if (!data.files.length) {
-                body.innerHTML = '<div class="recent-empty">No files scanned yet. Browse some directories first.</div>';
-                return;
-            }
-            body.innerHTML = data.files.map(f => {
-                const dir = f.path.replace(/\/[^/]+$/, '');
-                const tags = [
-                    f.ext  ? `<span class="tag ${f.ext_class}">${escHtml(f.ext)}</span>` : '',
-                    f.human_size ? `<span class="tag size">${escHtml(f.human_size)}</span>` : '',
-                    (f.video_codec && f.video_codec !== 'N/A') ? `<span class="tag ${f.codec_class}">${escHtml(f.video_codec)}</span>` : '',
-                ].filter(Boolean).join('');
-                return `<div class="recent-row">
-                    <div style="flex:1;min-width:0">
-                        <div class="recent-name" title="${escHtmlAttr(f.path)}">${escHtml(f.stem)}</div>
-                        <div class="recent-dir">${escHtml(dir)}</div>
-                    </div>
-                    <div class="recent-tags">${tags}</div>
-                </div>`;
-            }).join('');
+            const resp = await fetch('/encode/info');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            _sysInfoData = await resp.json();
+            body.innerHTML = renderSysinfo(_sysInfoData);
         } catch (e) {
-            body.innerHTML = `<div class="recent-empty">Error: ${escHtml(e.message)}</div>`;
+            _sysInfoLoaded = false;
+            body.innerHTML = `<span class="si-err">Failed to load: ${escHtml(e.message)}</span>`;
         }
     }
-    function closeRecentModal() {
-        document.getElementById('recent-modal').style.display = 'none';
+    function exportSysInfoJson() {
+        if (!_sysInfoData) return;
+        const blob = new Blob([JSON.stringify(_sysInfoData, null, 2)], {type: 'application/json'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'mediastat-sysinfo.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    function renderSysinfo(d) {
+        const ok   = (t, note) => `<span class="si-ok">✓ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
+        const warn = (t, note) => `<span class="si-warn">✗ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
+        const row  = (label, content) => `<div class="si-row"><span class="si-label">${label}</span><span class="si-val">${content}</span></div>`;
+        const sec  = (title, rows) => `<div class="si-section"><div class="si-heading">${title}</div>${rows}</div>`;
+
+        const sys = d.system || {};
+        const hw  = d.hw  || {};
+        const ffe = d.ff_encoders || {};
+        const ffVer = d.versions?.ffmpeg;
+        const fpVer = d.versions?.ffprobe;
+
+        const sysRows = [
+            row('CPU', sys.cpu_model ? escHtml(sys.cpu_model) + (sys.cpu_cores ? `<span class="si-note">${sys.cpu_cores} physical cores</span>` : '') : warn('Unknown')),
+            row('RAM', sys.ram_total_gb != null ? ok(`${sys.ram_total_gb} GB`) : warn('Unknown')),
+        ].join('');
+
+        const versions = [
+            row('ffmpeg',  ffVer ? ok(escHtml(ffVer)) : warn('Not found')),
+            row('ffprobe', fpVer ? ok(escHtml(fpVer)) : warn('Not found')),
+        ].join('');
+
+        const hwRows = [
+            row('Intel QSV / VAAPI', hw.vaapi ? ok('Present') : warn('Not detected')),
+            row('NVIDIA NVENC',      hw.nvenc ? ok('Present') : warn('Not detected')),
+            row('AMD VAAPI',         hw.amd   ? ok('Present') : warn('Not detected')),
+        ].join('');
+
+        const ffEncRow = (label, hwKey, ffKey) => {
+            const hwOk = hw[hwKey], ffOk = ffe[ffKey];
+            if (ffOk && hwOk) return row(label, ok('Ready', 'compiled in · hardware present'));
+            if (ffOk && !hwOk) return row(label, `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`);
+            if (!ffOk && hwOk) return row(label, warn('Not compiled in', 'hardware present but this ffmpeg build lacks support'));
+            return row(label, warn('Not available'));
+        };
+        const hbEncRows = [
+            ffEncRow('hevc_vaapi (Intel/AMD)', 'vaapi', 'vaapi'),
+            ffEncRow('hevc_nvenc (NVIDIA)',    'nvenc',  'nvenc'),
+            row('libx265 (software)',          ffe.libx265 ? ok('Available') : warn('Not compiled in')),
+        ].join('');
+
+        const drv = d.drivers || {};
+        const driList = (drv.dri_devices || []).map(d => d.replace('/dev/dri/','')).join(', ') || 'none';
+        const driverRows = [
+            row('/dev/dri devices',     driList !== 'none' ? ok(escHtml(driList)) : warn('none', 'no DRM render nodes — GPU passthrough not enabled')),
+            row('VA-API driver',        drv.vaapi_driver ? ok(escHtml(drv.vaapi_driver), drv.vaapi_profiles ? `${drv.vaapi_profiles} profiles` : '') : warn('not loaded', 'check VA-API driver install')),
+            row('Intel iHD driver',     drv.intel_iHD  ? ok('iHD_drv_video.so') : warn('not found', 'install intel-media-va-driver-non-free')),
+            row('Intel i965 driver',    drv.intel_i965 ? ok('i965_drv_video.so') : warn('not found', 'optional — older Intel GPUs only')),
+            row('Mesa VA driver',       drv.mesa_va    ? ok('present') : warn('not found', 'optional — AMD / software')),
+            row('Intel oneVPL (libvpl)',drv.libvpl     ? ok('libvpl.so') : warn('not found', 'install libvpl2 for QSV')),
+        ].join('');
+
+        return sec('System', sysRows)
+             + sec('Components', versions)
+             + sec('Hardware Detected', hwRows)
+             + sec('Media Drivers', driverRows)
+             + sec('ffmpeg Encoder Support', hbEncRows);
     }
 
     // ── Health check ──────────────────────────────────────────────
@@ -1735,7 +1640,7 @@
                         return `<div class="health-issue-row">
                             <div style="flex:1;min-width:0">
                                 <div class="health-issue-name" title="${escHtmlAttr(iss.path || iss.name)}">${escHtml(iss.name)}</div>
-                                ${dir ? `<div class="recent-dir">${escHtml(dir)}</div>` : ''}
+                                ${dir ? `<div class="file-dir">${escHtml(dir)}</div>` : ''}
                             </div>
                             <div class="health-issue-tags">${iss.issues.map(i => `<span class="health-issue-tag">${escHtml(i)}</span>`).join('')}</div>
                         </div>`;
@@ -1912,10 +1817,12 @@
         params.getAll('codec').forEach(val => {
             document.querySelector(`#global-sort-bar .filter-btn[data-filter-group="codec"][data-filter-val="${val}"]`)
                     ?.classList.add('active');
+            _filterState.codec.add(val);
         });
         params.getAll('res').forEach(val => {
             document.querySelector(`#global-sort-bar .filter-btn[data-filter-group="res"][data-filter-val="${val}"]`)
                     ?.classList.add('active');
+            _filterState.res.add(val);
         });
         // Dynamic filter groups — buttons are built later; store pending vals and apply after rebuild
         ['ext', 'audio', 'hdr'].forEach(group => {
@@ -1953,10 +1860,6 @@
                 node.querySelectorAll('.files-checking').forEach(startDirCheck);
                 if (node.classList.contains('dir-block')) { loadDirSizes(node); }
                 node.querySelectorAll('.dir-block').forEach(b => { loadDirSizes(b); });
-                // Inject bookmark buttons into newly-added dir entries
-                if (node.classList.contains('dir-entry') || node.classList.contains('dir-block') || node.classList.contains('dir-children')) {
-                    _attachBookmarkButtons({ detail: { target: node } });
-                }
                 needsFilter = true;
                 needsRebuild = true;
             }
@@ -1984,7 +1887,11 @@
         return _normalizeCodecVal(codec) === filterVal;
     }
 
+    // Cached filter state — updated in toggleFilter/restoreFromUrl, avoids querySelectorAll per applyFilters call
+    const _filterState = { codec: new Set(), res: new Set(), ext: new Set(), audio: new Set(), hdr: new Set() };
+
     function _activeFilters(group) {
+        // Used by _rebuildGroup to restore active state after dynamic rebuild
         return [...document.querySelectorAll(`#global-sort-bar .filter-btn.active[data-filter-group="${group}"]`)]
                .map(b => b.dataset.filterVal);
     }
@@ -2041,6 +1948,10 @@
         const active = new Set([..._activeFilters(group), ...(_pendingRestoreFilters[group] || [])]);
         delete _pendingRestoreFilters[group];
         container.replaceChildren();
+        if (_filterState[group]) {
+            _filterState[group].clear();
+            active.forEach(v => { if (vals.includes(v)) _filterState[group].add(v); });
+        }
         vals.forEach(val => {
             const btn = _makeFilterBtn(group, val, labelFn(val));
             if (active.has(val)) btn.classList.add('active');
@@ -2049,21 +1960,14 @@
     }
 
     function applyFilters() {
-        const term         = (document.getElementById('search-input').value || '').trim().toLowerCase();
-        const activeCodecs = _activeFilters('codec');
-        const activeRes    = _activeFilters('res');
-        const activeExt    = _activeFilters('ext');
-        const activeAudio  = _activeFilters('audio');
-        const activeHdr    = _activeFilters('hdr');
+        const term = (document.getElementById('search-input').value || '').trim().toLowerCase();
         document.querySelectorAll('.files-table > .file-entry').forEach(e => {
             if (term && !(e.dataset.name || '').includes(term)) { e.style.display = 'none'; return; }
-            if (activeCodecs.length > 0 && !activeCodecs.some(v => codecMatches(e.dataset.vcodec || '', v))) { e.style.display = 'none'; return; }
-            if (activeRes.length > 0) {
-                if (!activeRes.includes(resTag(parseInt(e.dataset.width) || 0, parseInt(e.dataset.height) || 0))) { e.style.display = 'none'; return; }
-            }
-            if (activeExt.length > 0 && !activeExt.includes(e.dataset.ext || '')) { e.style.display = 'none'; return; }
-            if (activeAudio.length > 0 && !activeAudio.includes(e.dataset.audio || '')) { e.style.display = 'none'; return; }
-            if (activeHdr.length > 0 && !activeHdr.includes(e.dataset.hdr || '')) { e.style.display = 'none'; return; }
+            if (_filterState.codec.size > 0 && ![..._filterState.codec].some(v => codecMatches(e.dataset.vcodec || '', v))) { e.style.display = 'none'; return; }
+            if (_filterState.res.size > 0 && !_filterState.res.has(resTag(parseInt(e.dataset.width) || 0, parseInt(e.dataset.height) || 0))) { e.style.display = 'none'; return; }
+            if (_filterState.ext.size > 0 && !_filterState.ext.has(e.dataset.ext || '')) { e.style.display = 'none'; return; }
+            if (_filterState.audio.size > 0 && !_filterState.audio.has(e.dataset.audio || '')) { e.style.display = 'none'; return; }
+            if (_filterState.hdr.size > 0 && !_filterState.hdr.has(e.dataset.hdr || '')) { e.style.display = 'none'; return; }
             e.style.display = '';
         });
         document.querySelectorAll('.dirs-container > .dir-entry')
@@ -2078,6 +1982,10 @@
 
     function toggleFilter(btn) {
         btn.classList.toggle('active');
+        const group = btn.dataset.filterGroup;
+        const val   = btn.dataset.filterVal;
+        if (btn.classList.contains('active')) _filterState[group] && _filterState[group].add(val);
+        else _filterState[group] && _filterState[group].delete(val);
         applyFilters();
         updateUrl();
     }
@@ -2143,10 +2051,10 @@
 
     function renderMediaInfo(d) {
         const kv    = (k, v) => v != null && v !== '' && v !== 0
-            ? `<span class="mi-key">${k}</span><span class="mi-val">${escHtml(String(v))}</span>`
+            ? `<div class="mi-row"><span class="mi-key">${k}</span><span class="mi-val">${escHtml(String(v))}</span></div>`
             : '';
         const kvRaw = (k, v) => v != null && v !== ''
-            ? `<span class="mi-key">${k}</span><span class="mi-val">${v}</span>`
+            ? `<div class="mi-row"><span class="mi-key">${k}</span><span class="mi-val">${v}</span></div>`
             : '';
         const sec = (title, rows) => rows
             ? `<div class="mi-section"><div class="mi-section-title">${title}</div><div class="mi-grid">${rows}</div></div>`
@@ -2192,7 +2100,7 @@
         }).join('');
 
         const subRows = (d.subtitle || []).map((s, i) =>
-            `<span class="mi-key">Track ${i+1}</span><span class="mi-val">${escHtml(s.codec)}${s.lang ? ' · '+escHtml(s.lang) : ''}${s.title ? ' · '+escHtml(s.title) : ''}</span>`
+            `<div class="mi-row"><span class="mi-key">Track ${i+1}</span><span class="mi-val">${escHtml(s.codec)}${s.lang ? ' · '+escHtml(s.lang) : ''}${s.title ? ' · '+escHtml(s.title) : ''}</span></div>`
         ).join('');
         const subSec = subRows ? sec('Subtitles', subRows) : '';
 

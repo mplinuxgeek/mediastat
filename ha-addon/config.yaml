@@ -45,22 +45,18 @@ map:
   - media:rw    # /media  — HA media directory (movies, TV, etc.)
   - share:ro    # /share  — optional, for media on network shares mounted by HA
 
-# ── GPU passthrough (pick ONE block and uncomment it) ─────────────────────────
+# GPU passthrough — DRI render nodes for Intel QSV / AMD VA-API.
+# HA supervisor silently skips any device that doesn't exist on the host,
+# so this is safe on machines without a GPU (software encoding is used instead).
+devices:
+  - /dev/dri
 #
-# Intel QSV / AMD VA-API — expose the DRM render nodes:
-# devices:
-#   - /dev/dri
-#
-# NVIDIA NVENC — expose the NVIDIA device nodes:
-# (the host must have nvidia-container-runtime installed)
-# devices:
+# NVIDIA NVENC requires additional host setup (nvidia-container-runtime).
+# Add these manually if needed:
 #   - /dev/nvidia0
 #   - /dev/nvidiactl
 #   - /dev/nvidia-uvm
 #   - /dev/nvidia-modeset
-#
-# Note: after editing this file, rebuild and reinstall the add-on.
-# The add-on log will show which GPU was detected on startup.
 
 # Persistent storage lives in /data (backed up with HA backups)
 # The add-on writes:

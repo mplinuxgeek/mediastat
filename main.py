@@ -8,6 +8,7 @@ import math
 import secrets
 import subprocess
 import time
+import platform
 from pathlib import Path
 from urllib.parse import quote
 from typing import Optional
@@ -69,6 +70,7 @@ ALLOWED_ROOTS = [
 
 # Active scan root — loaded from DB on startup, changeable at runtime
 current_root: Path = DEFAULT_ROOT
+_real_root: Path = Path(os.path.realpath(DEFAULT_ROOT))  # cached realpath, updated with current_root
 
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".ts", ".m4v"}
 
@@ -101,9 +103,7 @@ async def _list_dir(dir_path: Path) -> list[os.DirEntry]:
     except PermissionError:
         return []  # don't cache errors — let the next request retry
     if len(_dir_listing_cache) >= 500:
-        # Evict the oldest half to avoid O(n) on every insert
-        cutoff = sorted(_dir_listing_cache.values(), key=lambda v: v[1])[250][1]
-        for k in [k for k, v in list(_dir_listing_cache.items()) if v[1] <= cutoff]:
+        for k in sorted(_dir_listing_cache, key=lambda k: _dir_listing_cache[k][1])[:250]:
             del _dir_listing_cache[k]
     _dir_listing_cache[key] = (entries, now)
     return entries
@@ -114,10 +114,11 @@ _duration_cache: dict[str, float] = {}  # path → duration, cached across seeks
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global current_root, _hw_accel_info
+    global current_root, _real_root, _hw_accel_info
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     await init_db()
     current_root = await load_root()
+    _real_root = Path(os.path.realpath(current_root))
     # Load persisted schedule config
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key = 'encode_schedule'") as cur:
@@ -269,23 +270,27 @@ def size_css_class(size_bytes: int) -> str:
     return "size-green"
 
 
+_VALID_HDR_TYPES = frozenset({"DV", "HDR", "HLG", "SDR"})
+
+
 def _hdr_type_from_stream(video: dict) -> str:
     """Return 'DV', 'HDR', 'HLG', or 'SDR' from ffprobe stream data."""
     profile = (video.get("profile") or "").lower()
     if "dolby vision" in profile:
-        return "DV"
-    ct = video.get("color_transfer") or ""
-    if ct == "smpte2084":
-        return "HDR"
-    if ct == "arib-std-b67":
-        return "HLG"
-    # Fall back to checking primaries/colorspace — some encodes omit the
-    # transfer tag but still signal bt2020 wide-gamut content.
-    cp = video.get("color_primaries") or ""
-    cs = video.get("color_space") or ""
-    if "bt2020" in cp or "bt2020" in cs:
-        return "HDR"
-    return "SDR"
+        result = "DV"
+    else:
+        ct = video.get("color_transfer") or ""
+        if ct == "smpte2084":
+            result = "HDR"
+        elif ct == "arib-std-b67":
+            result = "HLG"
+        else:
+            # Fall back to checking primaries/colorspace — some encodes omit the
+            # transfer tag but still signal bt2020 wide-gamut content.
+            cp = video.get("color_primaries") or ""
+            cs = video.get("color_space") or ""
+            result = "HDR" if ("bt2020" in cp or "bt2020" in cs) else "SDR"
+    return result if result in _VALID_HDR_TYPES else "SDR"
 
 
 async def run_ffprobe(path: Path) -> dict:
@@ -395,7 +400,11 @@ async def dir_total_size(path: Path) -> int:
     except Exception:
         result = -1
 
-    _dir_size_cache[key] = (result, now)
+    if result != -1:
+        if len(_dir_size_cache) >= 500:
+            for k in sorted(_dir_size_cache, key=lambda k: _dir_size_cache[k][1])[:250]:
+                del _dir_size_cache[k]
+        _dir_size_cache[key] = (result, now)
     return result
 
 
@@ -405,7 +414,7 @@ async def _probe_file(db: aiosqlite.Connection, f: Path) -> dict | None:
         meta["name"] = f.name
         meta["stem"] = f.stem
         meta["ext"]  = f.suffix.lower()
-        meta["human_size"]  = human_size(meta["size"])
+        meta["human_size"]  = human_size(meta.get("size") or 0)
         meta["size_class"]  = size_css_class(meta.get("size") or 0)
         meta["codec_class"] = codec_css_class(meta.get("video_codec", ""))
         meta["ext_class"]      = ext_css_class(f.suffix)
@@ -497,32 +506,32 @@ async def _file_scan_events(dir_path: Path, request: Request):
     done_count = 0
     files_meta: list[dict] = []
 
-    async def probe_one(f) -> None:
-        async with _SCAN_SEM:
-            try:
-                async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async def probe_one(f) -> None:
+            async with _SCAN_SEM:
+                try:
                     meta = await _probe_file(db, Path(f.path))
-            except Exception:
-                meta = None
-        await queue.put(meta)
+                except Exception:
+                    meta = None
+            await queue.put(meta)
 
-    tasks = [asyncio.create_task(probe_one(f)) for f in mkv_files]
+        tasks = [asyncio.create_task(probe_one(f)) for f in mkv_files]
 
-    for _ in range(total):
-        if await request.is_disconnected():
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            return
-        meta = await queue.get()
-        done_count += 1
-        file_html = ""
-        if meta:
-            files_meta.append(meta)
-            file_html = templates.env.get_template("_files_table.html").render(files=[meta])
-        yield f"data: {json.dumps({'type': 'progress', 'done': done_count, 'total': total, 'file_html': file_html})}\n\n"
+        for _ in range(total):
+            if await request.is_disconnected():
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return
+            meta = await queue.get()
+            done_count += 1
+            file_html = ""
+            if meta:
+                files_meta.append(meta)
+                file_html = templates.env.get_template("_files_table.html").render(files=[meta])
+            yield f"data: {json.dumps({'type': 'progress', 'done': done_count, 'total': total, 'file_html': file_html})}\n\n"
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     files_meta.sort(key=lambda x: x["name"].lower())
     html = templates.env.get_template("_files_table.html").render(files=files_meta)
@@ -530,16 +539,18 @@ async def _file_scan_events(dir_path: Path, request: Request):
 
 
 def safe_path(path: str) -> Path:
+    # Snapshot globals to avoid TOCTOU race with concurrent /set-root
+    root = current_root
+    rroot = _real_root
     # normpath for fast lexical cleanup, realpath to catch symlink escapes
     p = Path(os.path.normpath(path))
     try:
-        p.relative_to(current_root)
+        p.relative_to(root)
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
     real = Path(os.path.realpath(p))
-    real_root = Path(os.path.realpath(current_root))
     try:
-        real.relative_to(real_root)
+        real.relative_to(rroot)
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
     return p
@@ -559,7 +570,7 @@ async def index(request: Request):
 
 @app.post("/set-root")
 async def set_root(request: Request, path: str = Form(...)):
-    global current_root
+    global current_root, _real_root
     base = request.state.ingress_path
     p = Path(path).expanduser().resolve()
     if ALLOWED_ROOTS and not any(p == allowed or p.is_relative_to(allowed) for allowed in ALLOWED_ROOTS):
@@ -567,6 +578,7 @@ async def set_root(request: Request, path: str = Form(...)):
     if not p.is_dir():
         return RedirectResponse(f"{base}/?error={quote(path)}+not+found", status_code=303)
     current_root = p
+    _real_root = Path(os.path.realpath(p))
     await save_root(p)
     return RedirectResponse(f"{base}/", status_code=303)
 
@@ -680,7 +692,9 @@ async def hls_playlist(
         raise HTTPException(status_code=404)
 
     duration = await _probe_duration(file_path)
-    num_segs = max(1, math.ceil(duration / _HLS_SEG_SECS)) if duration > 0 else 1
+    if duration <= 0:
+        raise HTTPException(status_code=503, detail="Could not determine file duration")
+    num_segs = math.ceil(duration / _HLS_SEG_SECS)
     encoded  = quote(path, safe="")
     vc       = quote(vcodec, safe="")
 
@@ -824,10 +838,11 @@ async def file_info(path: str = Query(...)):
                 return v
         return None
 
+    st = await asyncio.to_thread(file_path.stat)
     result = {
         "path":     str(file_path),
         "name":     file_path.name,
-        "size":     file_path.stat().st_size,
+        "size":     st.st_size,
         "format":   fmt.get("format_long_name") or fmt.get("format_name", ""),
         "duration": float(fmt.get("duration") or 0),
         "bitrate":  int(fmt.get("bit_rate") or 0),
@@ -886,6 +901,7 @@ async def delete_file(request: Request, path: str = Query(...)):
         await db.execute("DELETE FROM file_meta WHERE path = ?", (str(file_path),))
         await db.commit()
     _dir_size_cache.pop(str(file_path.parent), None)
+    _dir_listing_cache.pop(str(file_path.parent), None)
     return Response(status_code=204)
 
 
@@ -894,6 +910,7 @@ async def rescan(request: Request):
     if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
     _dir_size_cache.clear()
+    _dir_listing_cache.clear()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM file_meta")
         await db.commit()
@@ -1055,7 +1072,7 @@ async def _load_encode_jobs() -> None:
 
 def _detect_hw_accel_sync() -> dict:
     import glob as _glob
-    result = {"qsv": False, "nvenc": False, "amd": False, "vaapi": False}
+    result = {"qsv": False, "nvenc": False, "amd": False, "vaapi": False, "dri_device": ""}
     if shutil.which("nvidia-smi"):
         try:
             r = subprocess.run(
@@ -1073,34 +1090,78 @@ def _detect_hw_accel_sync() -> dict:
             with open(vfiles[0]) as f:
                 vid = f.read().strip()
             if vid == "0x8086":
-                result["vaapi"] = True
-                # Verify QSV session can actually be created — libvpl/libmfx may
-                # not be functional even when the Intel GPU is present.
+                _libva_env = {**os.environ, "LIBVA_DRIVER_NAME": "iHD"}
                 if shutil.which("ffmpeg"):
+                    # Test QSV first (Gen12+ oneVPL path)
                     try:
                         r = subprocess.run(
                             ["ffmpeg", "-v", "error",
-                             "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+                             "-init_hw_device", f"vaapi=va:{dev}",
                              "-init_hw_device", "qsv=hw@va",
                              "-filter_hw_device", "hw",
                              "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
                              "-vframes", "1", "-c:v", "hevc_qsv", "-f", "null", "-"],
                             capture_output=True, timeout=15,
-                            env={**os.environ, "LIBVA_DRIVER_NAME": "iHD"},
+                            env=_libva_env,
                         )
                         if r.returncode == 0:
-                            result["qsv"] = True
-                            log.info("QSV probe    : hevc_qsv functional")
+                            result["qsv"]   = True
+                            result["vaapi"] = True
+                            result["dri_device"] = dev
+                            log.info("QSV probe    : hevc_qsv functional (%s)", dev)
                         else:
                             err = (r.stderr or b"").decode(errors="replace").strip().splitlines()
-                            log.warning("QSV probe    : hevc_qsv unavailable — falling back to hevc_vaapi")
-                            for line in err[-5:]:
+                            log.warning("QSV probe    : hevc_qsv unavailable — testing hevc_vaapi")
+                            for line in err[-3:]:
                                 log.warning("QSV probe    : %s", line)
                     except Exception as e:
-                        log.warning("QSV probe    : test failed (%s) — falling back to hevc_vaapi", e)
+                        log.warning("QSV probe    : test failed (%s) — testing hevc_vaapi", e)
+                    # If QSV didn't work, test plain VAAPI before declaring it available
+                    if not result.get("qsv"):
+                        try:
+                            r = subprocess.run(
+                                ["ffmpeg", "-v", "error",
+                                 "-vaapi_device", dev,
+                                 "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+                                 "-vframes", "1",
+                                 "-vf", "format=nv12,hwupload",
+                                 "-c:v", "hevc_vaapi", "-f", "null", "-"],
+                                capture_output=True, timeout=15,
+                                env=_libva_env,
+                            )
+                            if r.returncode == 0:
+                                result["vaapi"] = True
+                                result["dri_device"] = dev
+                                log.info("VAAPI probe  : hevc_vaapi functional (%s)", dev)
+                            else:
+                                err = (r.stderr or b"").decode(errors="replace").strip().splitlines()
+                                log.warning("VAAPI probe  : hevc_vaapi unavailable — software encoding only")
+                                for line in err[-3:]:
+                                    log.warning("VAAPI probe  : %s", line)
+                        except Exception as e:
+                            log.warning("VAAPI probe  : test failed (%s) — software encoding only", e)
             elif vid == "0x1002":
                 result["amd"]   = True
-                result["vaapi"] = True
+                if shutil.which("ffmpeg"):
+                    try:
+                        r = subprocess.run(
+                            ["ffmpeg", "-v", "error",
+                             "-vaapi_device", dev,
+                             "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+                             "-vframes", "1",
+                             "-vf", "format=nv12,hwupload",
+                             "-c:v", "hevc_vaapi", "-f", "null", "-"],
+                            capture_output=True, timeout=15,
+                            env={**os.environ},
+                        )
+                        if r.returncode == 0:
+                            result["vaapi"] = True
+                            result["dri_device"] = dev
+                            log.info("VAAPI probe  : hevc_vaapi functional (%s)", dev)
+                        else:
+                            log.warning("VAAPI probe  : AMD hevc_vaapi unavailable — software encoding only")
+                    except Exception as e:
+                        log.warning("VAAPI probe  : AMD test failed (%s)", e)
         except Exception:
             pass
     return result
@@ -1166,11 +1227,22 @@ def _choose_encoder_name(hw: dict, gpu_pref: str) -> str:
     return "libx265"
 
 
+_HQDN3D_PRESETS = {
+    "ultralight": "1:1:3:3",
+    "light":      "2:2:5:5",
+    "medium":     "4:3:6:4.5",
+    "strong":     "6:5:10:7",
+    "stronger":   "8:7:12:9",
+    "verystrong": "10:9:15:11",
+}
+
+
 def _build_ffmpeg_cmd(
     input_path: str, output_path: str, config: dict,
     hw: dict, bit_depth: Optional[int] = None, is_hdr: bool = False,
     color_primaries: str = "", transfer_characteristics: str = "",
     color_space: str = "", color_range: str = "",
+    crop_filter: Optional[str] = None, a_streams: Optional[list] = None,
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
     encoder  = _choose_encoder_name(hw, gpu_pref)
@@ -1189,12 +1261,13 @@ def _build_ffmpeg_cmd(
     cmd = ["ffmpeg", "-y",
            "-analyzeduration", "100M", "-probesize", "100M"]
 
+    dri_dev = hw.get("dri_device") or "/dev/dri/renderD128"
     if is_qsv:
-        cmd += ["-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+        cmd += ["-init_hw_device", f"vaapi=va:{dri_dev}",
                 "-init_hw_device", "qsv=hw@va",
                 "-filter_hw_device", "hw"]
     elif is_vaapi:
-        cmd += ["-vaapi_device", "/dev/dri/renderD128"]
+        cmd += ["-vaapi_device", dri_dev]
     elif is_nvenc:
         cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
 
@@ -1215,11 +1288,15 @@ def _build_ffmpeg_cmd(
     if cs: color_meta += ["-colorspace",        cs]
     if cr: color_meta += ["-color_range",       cr]
 
+    denoise_params = _HQDN3D_PRESETS.get(denoise, "") if denoise else ""
+
     if is_qsv:
         pix_fmt = "p010le" if is_10bit else "nv12"
         vf = []
-        if denoise:
-            vf.append("hqdn3d")
+        if crop_filter:
+            vf.append(f"crop={crop_filter}")
+        if denoise_params:
+            vf.append(f"hqdn3d={denoise_params}")
         vf.append(f"format={pix_fmt}")
         if width:
             vf.append(f"scale={int(width)}:-2")
@@ -1232,8 +1309,10 @@ def _build_ffmpeg_cmd(
     elif is_vaapi:
         pix_fmt = "p010" if is_10bit else "nv12"
         vf = []
-        if denoise:
-            vf.append("hqdn3d")
+        if crop_filter:
+            vf.append(f"crop={crop_filter}")
+        if denoise_params:
+            vf.append(f"hqdn3d={denoise_params}")
         vf.append(f"format={pix_fmt}")
         if width:
             vf.append(f"scale={int(width)}:-2")
@@ -1245,6 +1324,8 @@ def _build_ffmpeg_cmd(
         cmd += color_meta
     elif is_nvenc:
         vf = []
+        if crop_filter:
+            vf.append(f"crop={crop_filter}")
         if width:
             vf.append(f"scale={int(width)}:-2")
         if vf:
@@ -1255,8 +1336,10 @@ def _build_ffmpeg_cmd(
         cmd += color_meta
     else:  # libx265
         vf = []
-        if denoise:
-            vf.append("hqdn3d")
+        if crop_filter:
+            vf.append(f"crop={crop_filter}")
+        if denoise_params:
+            vf.append(f"hqdn3d={denoise_params}")
         if width:
             vf.append(f"scale={int(width)}:-2")
         if vf:
@@ -1275,7 +1358,24 @@ def _build_ffmpeg_cmd(
     # Copy all audio/subtitle streams; -ignore_unknown drops streams the
     # container doesn't support (e.g. PGS subs in MP4) rather than failing.
     cmd += ["-c:a", "copy", "-c:s", "copy"]
-    cmd += ["-map", "0", "-ignore_unknown"]
+    lang = config.get("lang")
+    if lang and a_streams:
+        # Map only video, audio matching requested language (or untagged), and subtitles
+        stream_tags = [(s.get("tags") or {}) for s in a_streams]
+        matched_audio = [
+            idx for idx, tags in enumerate(stream_tags)
+            if not (tags.get("language") or tags.get("LANGUAGE") or "")
+            or (tags.get("language") or tags.get("LANGUAGE") or "").lower() in (lang.lower(), "und")
+        ]
+        if matched_audio:
+            cmd += ["-map", "0:v", "-map", "0:s?"]
+            for idx in matched_audio:
+                cmd += ["-map", f"0:a:{idx}"]
+            cmd += ["-ignore_unknown"]
+        else:
+            cmd += ["-map", "0", "-ignore_unknown"]
+    else:
+        cmd += ["-map", "0", "-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += [output_path]
@@ -1290,6 +1390,35 @@ def _validated_lang(value: object) -> str:
     return s if _LANG_RE.match(s) else "eng"
 
 
+async def _detect_crop(path: Path, duration: Optional[float]) -> Optional[str]:
+    """Run cropdetect on a 2-minute sample. Returns 'W:H:X:Y' string or None."""
+    sample_start = int((duration or 0) * 0.1) if duration and duration > 120 else 60
+    cmd = [
+        "ffmpeg", "-ss", str(sample_start), "-i", str(path),
+        "-t", "120", "-vf", "cropdetect=limit=24:round=2:reset=0",
+        "-f", "null", "-",
+    ]
+    try:
+        async with _PROBE_SEM:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=150)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return None
+        crops = [l for l in stderr.decode(errors="replace").splitlines()
+                 if "crop=" in l and "Parsed_cropdetect" in l]
+        if not crops:
+            return None
+        m = re.search(r'crop=(\d+:\d+:\d+:\d+)', crops[-1])
+        return m.group(1) if m else None
+    except Exception:
+        return None
 
 
 async def _run_encode_job(job_id: str) -> None:
@@ -1363,13 +1492,23 @@ async def _run_encode_job(job_id: str) -> None:
         except Exception as e:
             log.warning("Encode %s: could not get stream info: %s", job_id[:8], e)
 
+        crop_filter: Optional[str] = None
+        if job.config.get("crop"):
+            crop_filter = await _detect_crop(input_path, duration_sec)
+            if crop_filter:
+                log.info("Encode %s: cropdetect → crop=%s", job_id[:8], crop_filter)
+            else:
+                log.info("Encode %s: cropdetect found no crop", job_id[:8])
+
         cmd, encoder = _build_ffmpeg_cmd(
             job.input_path, job.output_path, job.config, _hw_accel_info,
-            bit_depth, is_hdr, cp, tc, cs, cr
+            bit_depth, is_hdr, cp, tc, cs, cr,
+            crop_filter=crop_filter, a_streams=a_streams,
         )
         job.encoder = encoder
         try:
-            job.input_size = input_path.stat().st_size
+            st = await asyncio.to_thread(input_path.stat)
+            job.input_size = st.st_size
         except Exception:
             pass
         _notify_encode(job_id)
@@ -1472,7 +1611,8 @@ async def _run_encode_job(job_id: str) -> None:
         log.error("Encode job %s failed: %s", job_id, exc, exc_info=True)
 
     finally:
-        job.finished_at = time.time()
+        if job.finished_at is None:
+            job.finished_at = time.time()
         job._proc = None
         if job.status in ("failed", "cancelled"):
             try:
@@ -1528,11 +1668,197 @@ def _get_driver_info() -> dict:
     return info
 
 
+def _get_system_info() -> dict:
+    """Return CPU model, core count, and total RAM."""
+    info: dict = {"cpu_model": None, "cpu_cores": None, "ram_total_gb": None}
+    # CPU model — try /proc/cpuinfo first (Linux), fall back to platform
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(errors="replace")
+        for line in cpuinfo.splitlines():
+            if line.startswith("model name"):
+                info["cpu_model"] = line.split(":", 1)[1].strip()
+                break
+        # Count physical cores (unique core id + physical id pairs)
+        cores = set()
+        phys = pkg = None
+        for line in cpuinfo.splitlines():
+            if line.startswith("physical id"):
+                pkg = line.split(":", 1)[1].strip()
+            elif line.startswith("core id"):
+                phys = line.split(":", 1)[1].strip()
+            elif line == "" and pkg is not None and phys is not None:
+                cores.add((pkg, phys))
+                pkg = phys = None
+        info["cpu_cores"] = len(cores) if cores else os.cpu_count()
+    except Exception:
+        info["cpu_model"] = platform.processor() or platform.machine() or None
+        info["cpu_cores"] = os.cpu_count()
+    # Total RAM from /proc/meminfo
+    try:
+        meminfo = Path("/proc/meminfo").read_text(errors="replace")
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                info["ram_total_gb"] = round(kb / 1024 / 1024, 1)
+                break
+    except Exception:
+        pass
+    return info
+
+
+def _collect_hw_debug() -> dict:
+    """Collect verbose hardware diagnostics for the JSON export."""
+    import glob as _glob
+    dbg: dict = {
+        "env": {},
+        "dri_devices": [],
+        "kernel_modules": {},
+        "lspci_display": None,
+        "vainfo_iHD": None,
+        "vainfo_default": None,
+        "ffmpeg_probe_qsv": {},
+        "ffmpeg_probe_vaapi": {},
+        "ffmpeg_probe_nvenc": {},
+    }
+
+    # Relevant environment variables
+    for var in ("LIBVA_DRIVER_NAME", "LIBVA_DRIVERS_PATH", "LIBVA_TRACE",
+                "DRI_PRIME", "MESA_VK_DEVICE_SELECT", "VK_ICD_FILENAMES"):
+        val = os.environ.get(var)
+        if val is not None:
+            dbg["env"][var] = val
+
+    # Per-device info: path, permissions, vendor id, driver symlink
+    for dev in sorted(_glob.glob("/dev/dri/renderD*")):
+        entry: dict = {"path": dev}
+        try:
+            st = os.stat(dev)
+            entry["mode"] = oct(st.st_mode)
+            entry["gid"]  = st.st_gid
+        except Exception as e:
+            entry["stat_error"] = str(e)
+        # Vendor ID from sysfs
+        vfiles = _glob.glob(f"/sys/class/drm/{os.path.basename(dev)}/device/vendor")
+        if vfiles:
+            try:
+                entry["vendor_id"] = Path(vfiles[0]).read_text().strip()
+            except Exception:
+                pass
+        # device/uevent for driver name
+        uevent_path = f"/sys/class/drm/{os.path.basename(dev)}/device/uevent"
+        try:
+            uevent = Path(uevent_path).read_text(errors="replace")
+            for line in uevent.splitlines():
+                if line.startswith("DRIVER="):
+                    entry["kernel_driver"] = line.split("=", 1)[1]
+                    break
+        except Exception:
+            pass
+        dbg["dri_devices"].append(entry)
+
+    # Kernel modules: are the relevant drivers loaded?
+    try:
+        modules_text = Path("/proc/modules").read_text(errors="replace")
+        loaded = {line.split()[0] for line in modules_text.splitlines() if line}
+        for mod in ("i915", "xe", "amdgpu", "radeon", "nvidia", "nvidia_drm",
+                    "nvidia_uvm", "nouveau"):
+            dbg["kernel_modules"][mod] = mod in loaded
+    except Exception:
+        pass
+
+    # lspci — display/VGA devices
+    if shutil.which("lspci"):
+        try:
+            r = subprocess.run(["lspci", "-mm", "-d", "::0300"],
+                               capture_output=True, text=True, timeout=5)
+            vga = r.stdout.strip()
+            r2  = subprocess.run(["lspci", "-mm", "-d", "::0302"],
+                                 capture_output=True, text=True, timeout=5)
+            _3d = r2.stdout.strip()
+            dbg["lspci_display"] = "\n".join(filter(None, [vga, _3d])) or None
+        except Exception:
+            pass
+
+    # vainfo with iHD forced, then with default driver
+    def _run_vainfo(env_override: dict) -> dict:
+        if not shutil.which("vainfo"):
+            return {"error": "vainfo not found"}
+        env = {**os.environ, **env_override}
+        try:
+            r = subprocess.run(["vainfo", "--display", "drm", "--device",
+                                 dbg["dri_devices"][0]["path"]] if dbg["dri_devices"]
+                                else ["vainfo"],
+                               capture_output=True, text=True, timeout=10, env=env)
+            return {
+                "returncode": r.returncode,
+                "stdout": r.stdout.strip(),
+                "stderr": r.stderr.strip(),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    dbg["vainfo_iHD"]     = _run_vainfo({"LIBVA_DRIVER_NAME": "iHD"})
+    dbg["vainfo_default"] = _run_vainfo({})
+
+    # Fresh ffmpeg encoder probes with full stderr captured
+    def _probe(cmd: list, env_override: dict | None = None) -> dict:
+        if not shutil.which("ffmpeg"):
+            return {"error": "ffmpeg not found"}
+        env = {**os.environ, **(env_override or {})}
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=20, env=env)
+            return {
+                "returncode": r.returncode,
+                "stderr": r.stderr.decode(errors="replace").strip(),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    devs = [d["path"] for d in dbg["dri_devices"]]
+    iHD_env = {"LIBVA_DRIVER_NAME": "iHD"}
+
+    if devs:
+        dev = devs[0]
+        dbg["ffmpeg_probe_qsv"] = _probe(
+            ["ffmpeg", "-v", "verbose",
+             "-init_hw_device", f"vaapi=va:{dev}",
+             "-init_hw_device", "qsv=hw@va",
+             "-filter_hw_device", "hw",
+             "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+             "-vframes", "1", "-c:v", "hevc_qsv", "-f", "null", "-"],
+            iHD_env,
+        )
+        dbg["ffmpeg_probe_vaapi"] = _probe(
+            ["ffmpeg", "-v", "verbose",
+             "-vaapi_device", dev,
+             "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+             "-vframes", "1",
+             "-vf", "format=nv12,hwupload",
+             "-c:v", "hevc_vaapi", "-f", "null", "-"],
+            iHD_env,
+        )
+    else:
+        dbg["ffmpeg_probe_qsv"]   = {"skipped": "no /dev/dri/renderD* devices found"}
+        dbg["ffmpeg_probe_vaapi"] = {"skipped": "no /dev/dri/renderD* devices found"}
+
+    if shutil.which("nvidia-smi"):
+        dbg["ffmpeg_probe_nvenc"] = _probe(
+            ["ffmpeg", "-v", "verbose",
+             "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=1",
+             "-vframes", "1", "-c:v", "hevc_nvenc", "-f", "null", "-"],
+        )
+    else:
+        dbg["ffmpeg_probe_nvenc"] = {"skipped": "nvidia-smi not found"}
+
+    return dbg
+
+
 @app.get("/encode/info")
 async def encode_info():
     """Return component versions and hardware encoder support."""
     result: dict = {"hw": _hw_accel_info, "versions": {}, "ff_encoders": {},
-                    "drivers": await asyncio.to_thread(_get_driver_info)}
+                    "drivers": await asyncio.to_thread(_get_driver_info),
+                    "system": await asyncio.to_thread(_get_system_info)}
 
     # ffmpeg version
     try:
@@ -1577,6 +1903,7 @@ async def encode_info():
     except Exception:
         result["ff_encoders"] = {"qsv": False, "vaapi": False, "nvenc": False, "libx265": False}
 
+    result["debug"] = await asyncio.to_thread(_collect_hw_debug)
     return result
 
 
@@ -1727,12 +2054,16 @@ async def start_folder_encode(request: Request, path: str = Query(...)):
 
     config = _make_encode_config(body)
 
-    media_files: list[Path] = []
-    for root, _, files in os.walk(folder):
-        for fname in files:
-            if os.path.splitext(fname)[1].lower() in MEDIA_EXTENSIONS:
-                media_files.append(Path(root) / fname)
-    media_files.sort()
+    def _walk_media(base: Path) -> list[Path]:
+        result = []
+        for root, _, files in os.walk(base):
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in MEDIA_EXTENSIONS:
+                    result.append(Path(root) / fname)
+        result.sort()
+        return result
+
+    media_files = await asyncio.to_thread(_walk_media, folder)
 
     queued: list[str] = []
     for fpath in media_files:
@@ -1851,6 +2182,13 @@ async def move_encode(job_id: str, request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     job.moved = True
+    # Invalidate stale metadata so next dir scan picks up the replaced file
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM file_meta WHERE path = ?", (str(dst),))
+        await db.commit()
+    parent = str(dst.parent)
+    _dir_size_cache.pop(parent, None)
+    _dir_listing_cache.pop(parent, None)
     _notify_encode(job_id)
     await _save_encode_job(job)
     return Response(status_code=204)
@@ -2024,23 +2362,27 @@ async def find_dupes(threshold: float = Query(default=0.9, ge=0.5, le=1.0)):
             "res":   f"{row['width']}×{row['height']}" if row["width"] and row["height"] else "",
         })
 
-    used = [False] * len(files)
-    groups: list[list[dict]] = []
-    for i in range(len(files)):
-        if used[i]:
-            continue
-        group = [{"file": files[i], "score": 1.0}]
-        for j in range(i + 1, len(files)):
-            if used[j]:
+    def _find_groups(flist: list, thresh: float) -> list:
+        # Greedy O(N²) grouping — transitivity not guaranteed for N-way dupes
+        used = [False] * len(flist)
+        result = []
+        for i in range(len(flist)):
+            if used[i]:
                 continue
-            score = _dice_sim(files[i]["norm"], files[j]["norm"])
-            if score >= threshold:
-                group.append({"file": files[j], "score": round(score, 3)})
-                used[j] = True
-        if len(group) > 1:
-            used[i] = True
-            groups.append(group)
+            group = [{"file": flist[i], "score": 1.0}]
+            for j in range(i + 1, len(flist)):
+                if used[j]:
+                    continue
+                score = _dice_sim(flist[i]["norm"], flist[j]["norm"])
+                if score >= thresh:
+                    group.append({"file": flist[j], "score": round(score, 3)})
+                    used[j] = True
+            if len(group) > 1:
+                used[i] = True
+                result.append(group)
+        return result
 
+    groups = await asyncio.to_thread(_find_groups, files, threshold)
     return {"groups": groups}
 
 
