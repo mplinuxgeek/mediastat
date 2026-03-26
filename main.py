@@ -1160,6 +1160,22 @@ def _detect_hw_accel_sync() -> dict:
                                 result["vaapi"] = True
                                 result["dri_device"] = dev
                                 log.info("VAAPI probe  : hevc_vaapi functional (%s)", dev)
+                                # Probe av1_vaapi support
+                                try:
+                                    r3 = subprocess.run(
+                                        ["ffmpeg", "-v", "error",
+                                         "-vaapi_device", dev,
+                                         "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=24",
+                                         "-vframes", "1",
+                                         "-vf", "format=nv12,hwupload",
+                                         "-c:v", "av1_vaapi", "-f", "null", "-"],
+                                        capture_output=True, timeout=15,
+                                        env=_libva_env,
+                                    )
+                                    result["av1_hw"] = r3.returncode == 0
+                                    log.info("AV1 VAAPI probe: %s", "supported" if result["av1_hw"] else "not supported — will use libsvtav1")
+                                except Exception as e:
+                                    log.warning("AV1 VAAPI probe: failed (%s)", e)
                             else:
                                 err = (r.stderr or b"").decode(errors="replace").strip().splitlines()
                                 log.warning("VAAPI probe  : hevc_vaapi unavailable — software encoding only")
@@ -1246,24 +1262,27 @@ def _choose_encoder_name(hw: dict, gpu_pref: str, codec: str = "hevc") -> str:
     _SW    = {"hevc": "libx265",    "h264": "libx264",    "av1": "libsvtav1"}
     _QSV   = {"hevc": "hevc_qsv",  "h264": "h264_qsv",  "av1": "av1_qsv"}
     _NVENC = {"hevc": "hevc_nvenc","h264": "h264_nvenc", "av1": "av1_nvenc"}
-    _VAAPI = {"hevc": "hevc_vaapi","h264": "h264_vaapi", "av1": "hevc_vaapi"}
+    _VAAPI = {"hevc": "hevc_vaapi","h264": "h264_vaapi", "av1": "av1_vaapi"}
     sw = _SW.get(codec, "libx265")
 
-    def _qsv(c):
-        # AV1 QSV requires hardware AV1 encode support (Arc / Meteor Lake+).
-        # Alder/Raptor Lake iGPUs can only decode AV1 — fall back to libsvtav1.
-        if c == "av1" and not hw.get("av1_hw"):
+    def _with_av1_guard(enc_map: dict, fallback: str) -> str:
+        # AV1 hardware encode requires explicit runtime support (not all GPUs have it).
+        # Fall back to libsvtav1 if the startup probe found it unsupported.
+        if codec == "av1" and not hw.get("av1_hw"):
             return sw
-        return _QSV.get(c, "hevc_qsv")
+        return enc_map.get(codec, fallback)
 
     if gpu_pref == "none":   return sw
-    if gpu_pref == "intel":  return _qsv(codec)  if hw.get("qsv")   else sw
-    if gpu_pref == "nvidia": return _NVENC.get(codec, "hevc_nvenc") if hw.get("nvenc") else sw
-    if gpu_pref == "amd":    return _VAAPI.get(codec, "hevc_vaapi") if hw.get("amd")   else sw
-    # Auto: prefer QSV (Intel) > NVENC > VAAPI (AMD) > software
-    if hw.get("qsv"):    return _qsv(codec)
-    if hw.get("nvenc"):  return _NVENC.get(codec, "hevc_nvenc")
-    if hw.get("vaapi"):  return _VAAPI.get(codec, "hevc_vaapi")
+    if gpu_pref == "intel":
+        if hw.get("qsv"):   return _with_av1_guard(_QSV,   "hevc_qsv")
+        if hw.get("vaapi"): return _with_av1_guard(_VAAPI, "hevc_vaapi")
+        return sw
+    if gpu_pref == "nvidia": return _with_av1_guard(_NVENC, "hevc_nvenc") if hw.get("nvenc") else sw
+    if gpu_pref == "amd":    return _with_av1_guard(_VAAPI, "hevc_vaapi") if hw.get("amd")   else sw
+    # Auto: prefer QSV (Intel) > NVENC > VAAPI (Intel/AMD) > software
+    if hw.get("qsv"):    return _with_av1_guard(_QSV,   "hevc_qsv")
+    if hw.get("nvenc"):  return _with_av1_guard(_NVENC, "hevc_nvenc")
+    if hw.get("vaapi"):  return _with_av1_guard(_VAAPI, "hevc_vaapi")
     return sw
 
 
@@ -1345,7 +1364,7 @@ def _build_ffmpeg_cmd(
         if denoise_params:
             vf.append(f"hqdn3d={denoise_params}")
         if is_av1 and source_fps:
-            # QSV AV1 runtime rejects fractional framerates (e.g. 23.976).
+            # QSV and VAAPI AV1 runtimes reject fractional framerates (e.g. 23.976).
             # Normalise to the nearest integer fps before hwupload.
             vf.append(f"fps={round(source_fps)}")
         vf.append(f"format={pix_fmt}")
