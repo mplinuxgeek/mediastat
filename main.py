@@ -1072,7 +1072,7 @@ async def _load_encode_jobs() -> None:
 
 def _detect_hw_accel_sync() -> dict:
     import glob as _glob
-    result = {"qsv": False, "nvenc": False, "amd": False, "vaapi": False, "dri_device": ""}
+    result = {"qsv": False, "nvenc": False, "nvenc_cuvid": False, "amd": False, "vaapi": False, "dri_device": ""}
     if shutil.which("nvidia-smi"):
         try:
             r = subprocess.run(
@@ -1080,6 +1080,14 @@ def _detect_hw_accel_sync() -> dict:
                 capture_output=True, text=True, timeout=5,
             )
             result["nvenc"] = r.returncode == 0 and bool(r.stdout.strip())
+        except Exception:
+            pass
+    if result["nvenc"] and shutil.which("ffmpeg"):
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-decoders"], capture_output=True, text=True, timeout=5,
+            )
+            result["nvenc_cuvid"] = "hevc_cuvid" in r.stdout
         except Exception:
             pass
     for dev in sorted(_glob.glob("/dev/dri/renderD*")):
@@ -1214,17 +1222,22 @@ async def _encode_worker() -> None:
             log.error("Encode worker error for job %s: %s", job_id, exc, exc_info=True)
 
 
-def _choose_encoder_name(hw: dict, gpu_pref: str) -> str:
-    """Return ffmpeg encoder name based on available hardware and user preference."""
-    if gpu_pref == "none":    return "libx265"
-    if gpu_pref == "intel":   return "hevc_qsv"  if hw.get("qsv")   else "libx265"
-    if gpu_pref == "nvidia":  return "hevc_nvenc" if hw.get("nvenc") else "libx265"
-    if gpu_pref == "amd":     return "hevc_vaapi" if hw.get("amd")   else "libx265"
+def _choose_encoder_name(hw: dict, gpu_pref: str, codec: str = "hevc") -> str:
+    """Return ffmpeg encoder name based on available hardware, user preference, and codec."""
+    _SW = {"hevc": "libx265", "h264": "libx264", "av1": "libsvtav1"}
+    _QSV = {"hevc": "hevc_qsv", "h264": "h264_qsv", "av1": "av1_qsv"}
+    _NVENC = {"hevc": "hevc_nvenc", "h264": "h264_nvenc", "av1": "av1_nvenc"}
+    _VAAPI = {"hevc": "hevc_vaapi", "h264": "h264_vaapi", "av1": "hevc_vaapi"}  # AV1 VAAPI rare, fall back to hevc
+    sw = _SW.get(codec, "libx265")
+    if gpu_pref == "none":   return sw
+    if gpu_pref == "intel":  return _QSV.get(codec, "hevc_qsv")   if hw.get("qsv")   else sw
+    if gpu_pref == "nvidia": return _NVENC.get(codec, "hevc_nvenc") if hw.get("nvenc") else sw
+    if gpu_pref == "amd":    return _VAAPI.get(codec, "hevc_vaapi") if hw.get("amd")   else sw
     # Auto: prefer QSV (Intel) > NVENC > VAAPI (AMD) > software
-    if hw.get("qsv"):    return "hevc_qsv"
-    if hw.get("nvenc"):  return "hevc_nvenc"
-    if hw.get("vaapi"):  return "hevc_vaapi"
-    return "libx265"
+    if hw.get("qsv"):    return _QSV.get(codec, "hevc_qsv")
+    if hw.get("nvenc"):  return _NVENC.get(codec, "hevc_nvenc")
+    if hw.get("vaapi"):  return _VAAPI.get(codec, "hevc_vaapi")
+    return sw
 
 
 _HQDN3D_PRESETS = {
@@ -1245,10 +1258,12 @@ def _build_ffmpeg_cmd(
     crop_filter: Optional[str] = None, a_streams: Optional[list] = None,
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
-    encoder  = _choose_encoder_name(hw, gpu_pref)
-    is_qsv   = encoder == "hevc_qsv"
-    is_vaapi = encoder == "hevc_vaapi"
-    is_nvenc = encoder == "hevc_nvenc"
+    codec    = config.get("codec", "hevc")
+    encoder  = _choose_encoder_name(hw, gpu_pref, codec)
+    is_qsv   = encoder.endswith("_qsv")
+    is_vaapi = encoder.endswith("_vaapi")
+    is_nvenc = encoder.endswith("_nvenc")
+    is_av1   = "av1" in encoder
     is_10bit = is_hdr or bool(bit_depth and bit_depth >= 10)
     qp       = config.get("qp", 18)
     denoise  = config.get("denoise")
@@ -1256,7 +1271,13 @@ def _build_ffmpeg_cmd(
 
     _PRESET_MAP = {"speed": "veryfast", "fast": "fast", "balanced": "medium",
                    "quality": "slow", "archive": "veryslow"}
-    preset = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
+    _NVENC_PRESET_MAP = {"speed": "p1", "fast": "p2", "balanced": "p3",
+                         "quality": "p4", "archive": "p6"}
+    preset      = _PRESET_MAP.get(config.get("preset", "quality"), "slow")
+    nvenc_preset = _NVENC_PRESET_MAP.get(config.get("preset", "fast"), "p2")
+    # av1_qsv only supports up to 'medium'; slower presets are rejected at runtime.
+    if "av1_qsv" in encoder and preset in ("slow", "slower", "veryslow"):
+        preset = "medium"
 
     cmd = ["ffmpeg", "-y",
            "-analyzeduration", "100M", "-probesize", "100M"]
@@ -1268,7 +1289,8 @@ def _build_ffmpeg_cmd(
                 "-filter_hw_device", "hw"]
     elif is_vaapi:
         cmd += ["-vaapi_device", dri_dev]
-    elif is_nvenc:
+    elif is_nvenc and hw.get("nvenc_cuvid") and codec != "h264":
+        # H264 NVENC can't consume CUDA frames — skip cuvid for H264 entirely
         cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
 
     cmd += ["-i", input_path]
@@ -1303,7 +1325,10 @@ def _build_ffmpeg_cmd(
         vf.append("hwupload=extra_hw_frames=64")
         cmd += ["-vf", ",".join(vf)]
         cmd += ["-c:v", encoder, "-global_quality", str(qp), "-preset", preset]
-        if is_10bit:
+        if is_av1:
+            # QSV AV1 rejects variable/fractional framerates; force CFR.
+            cmd += ["-fps_mode", "cfr"]
+        if is_10bit and not is_av1:
             cmd += ["-profile:v", "main10"]
         cmd += color_meta
     elif is_vaapi:
@@ -1319,22 +1344,32 @@ def _build_ffmpeg_cmd(
         vf.append("hwupload")
         cmd += ["-vf", ",".join(vf)]
         cmd += ["-c:v", encoder, "-qp", str(qp)]
-        if is_10bit:
+        if is_10bit and not is_av1:
             cmd += ["-profile:v", "main10"]
         cmd += color_meta
     elif is_nvenc:
         vf = []
+        if codec == "h264":
+            # H264 NVENC requires 8-bit nv12 — always convert regardless of source
+            vf.append("format=nv12")
         if crop_filter:
             vf.append(f"crop={crop_filter}")
+        if denoise_params:
+            vf.append(f"hqdn3d={denoise_params}")
         if width:
             vf.append(f"scale={int(width)}:-2")
+        if vf and hw.get("nvenc_cuvid") and codec != "h264":
+            # CPU filters can't operate on CUDA frames — wrap with download/upload.
+            # H264 uses CPU decode so its frames are already in system memory.
+            pix_fmt = "p010le" if is_10bit else "nv12"
+            vf = [f"hwdownload,format={pix_fmt}"] + vf + ["hwupload"]
         if vf:
             cmd += ["-vf", ",".join(vf)]
-        cmd += ["-c:v", encoder, "-rc:v", "constqp", "-qp:v", str(qp), "-preset", "p4"]
-        if is_10bit:
+        cmd += ["-c:v", encoder, "-rc:v", "constqp", "-qp:v", str(qp), "-preset", nvenc_preset]
+        if is_10bit and not is_av1 and codec != "h264":
             cmd += ["-profile:v", "main10"]
         cmd += color_meta
-    else:  # libx265
+    else:  # software: libx265, libx264, libsvtav1
         vf = []
         if crop_filter:
             vf.append(f"crop={crop_filter}")
@@ -1344,8 +1379,11 @@ def _build_ffmpeg_cmd(
             vf.append(f"scale={int(width)}:-2")
         if vf:
             cmd += ["-vf", ",".join(vf)]
-        cmd += ["-c:v", encoder, "-crf", str(qp), "-preset", preset]
-        if is_hdr and cp and tc:
+        if encoder == "libsvtav1":
+            cmd += ["-c:v", encoder, "-crf", str(qp), "-preset", "6"]  # SVT-AV1 preset 0-13
+        else:
+            cmd += ["-c:v", encoder, "-crf", str(qp), "-preset", preset]
+        if encoder == "libx265" and is_hdr and cp and tc:
             # Embed HDR10 metadata in the x265 bitstream; use source colormatrix
             # (cs) when available, otherwise default to bt2020nc.
             colormatrix = cs if cs else "bt2020nc"
@@ -1987,7 +2025,8 @@ async def start_encode(request: Request, path: str = Query(...)):
     config = _make_encode_config(body)
 
     fmt = config["format"]
-    base_stem = f"{file_path.stem} (qp{config['qp']})"
+    _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
+    base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
     candidate = file_path.parent / f"{base_stem}.{fmt}"
     counter = 2
@@ -2022,12 +2061,16 @@ def _make_encode_config(body: dict) -> dict:
     if gpu not in ("auto", "intel", "nvidia", "amd", "none"):
         gpu = "auto"
     preset_val = str(body.get("preset", "quality"))
-    if preset_val not in ("quality", "balanced", "speed"):
+    if preset_val not in ("quality", "balanced", "fast", "speed", "archive"):
         preset_val = "quality"
+    codec = str(body.get("codec", "hevc")).lower()
+    if codec not in ("hevc", "h264", "av1"):
+        codec = "hevc"
     return {
         "qp":      max(1, min(51, int(body.get("qp", 18)))),
         "preset":  preset_val,
         "gpu":     gpu,
+        "codec":   codec,
         "format":  fmt,
         "denoise": body.get("denoise") if body.get("denoise") in ("ultralight", "light", "medium", "strong", "stronger", "verystrong") else None,
         "crop":    bool(body.get("crop", False)),
@@ -2039,7 +2082,8 @@ def _make_encode_config(body: dict) -> dict:
 def _queue_file_encode(file_path: Path, config: dict) -> str | None:
     """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
     fmt = config["format"]
-    base_stem = f"{file_path.stem} (qp{config['qp']})"
+    _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
+    base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
     candidate = file_path.parent / f"{base_stem}.{fmt}"
     counter = 2
