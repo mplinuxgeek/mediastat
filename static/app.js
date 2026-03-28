@@ -801,7 +801,7 @@
         const pctEl  = document.getElementById('imdb-auto-pct');
         const msgEl  = document.getElementById('imdb-auto-msg');
 
-        // ── Phase 1: parallel searches (8 concurrent) ────────────────
+        // ── Phase 1: parallel searches (32 concurrent) ───────────────
         const searchData = new Array(total).fill(null);
         let nextIdx = 0, doneCount = 0;
 
@@ -830,7 +830,7 @@
                 msgEl.textContent  = `Searching ${doneCount} / ${total}`;
             }
         }
-        await Promise.all(Array.from({ length: Math.min(8, total) }, _fetchOne));
+        await Promise.all(Array.from({ length: Math.min(32, total) }, _fetchOne));
 
         // ── Phase 2: sort into auto vs prompt ────────────────────────
         const _norm = s => s.toLowerCase().replace(/&/g, ' and ').replace(/['\/\u2019]/g, '').replace(/[:",.?!\-\u2013\u2014]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -876,7 +876,7 @@
             }
         }
 
-        // ── Phase 2b: parallel auto-matches (8 concurrent) ───────────
+        // ── Phase 2b: parallel auto-matches (32 concurrent) ──────────
         const autoTotal   = autoItems.length;
         const promptTotal = promptItems.length;
         let nextAuto = 0, autoDone = 0;
@@ -900,7 +900,7 @@
                 _autoUpdateStats(autoC, manualC, skippedC, noneC);
             }
         }
-        if (autoTotal) await Promise.all(Array.from({ length: Math.min(8, autoTotal) }, _matchOne));
+        if (autoTotal) await Promise.all(Array.from({ length: Math.min(32, autoTotal) }, _matchOne));
 
         // ── Phase 2c: sequential prompts ─────────────────────────────
         for (let i = 0; i < promptTotal; i++) {
