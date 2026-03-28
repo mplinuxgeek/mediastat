@@ -182,6 +182,8 @@ IMDB_NAMES_URL      = "https://datasets.imdbws.com/name.basics.tsv.gz"
 IMDB_RATINGS_URL    = "https://datasets.imdbws.com/title.ratings.tsv.gz"
 _imdb_progress: dict = {}
 _setdates_progress: dict = {"phase": "idle", "done": 0, "total": 0, "skipped": 0, "updated": 0, "errors": 0}
+_imdbscan_progress: dict = {"phase": "idle", "searched": 0, "total": 0,
+                             "auto": 0, "skipped": 0, "none": 0, "review": []}
 
 
 def _norm_title(s: str) -> str:
@@ -190,6 +192,237 @@ def _norm_title(s: str) -> str:
     s = s.lower().replace("&", " and ")
     s = re.sub(r"['/\u2019]", "", s)   # remove apostrophes and forward-slashes
     return re.sub(r"\s+", " ", re.sub(r"[:\",.?!\-\u2013\u2014]", " ", s)).strip()
+
+
+_EDITION_RE_PY = re.compile(
+    r'\s*(?:[-\u2013\u2014]\s*)?(?:the\s+)?(?:'
+    r'super\s+duper\s+cut|director\u2019?s?\s+cut|theatrical\s+cut|'
+    r'extended\s+(?:cut|edition)|unrated\s+(?:cut|edition)|'
+    r'ultimate\s+(?:cut|edition)|special\s+edition|anniversary\s+edition|'
+    r'final\s+cut|collector\u2019?s?\s+edition|redux\b|remastered\b'
+    r')\s*$',
+    re.IGNORECASE,
+)
+_PREF_TYPES = frozenset({"movie", "tvMovie", "tvMiniSeries", "tvSpecial"})
+
+
+def _parse_filename_py(name: str) -> dict:
+    """Extract title + year from a media filename (mirror of JS parseMediaFilename)."""
+    stem = re.sub(r'\.[^.]{2,5}$', '', name)
+    m = re.match(r'^(.*?)\s*[\(\[]((?:19|20)\d{2})[\)\]]', stem)
+    if m:
+        title = _EDITION_RE_PY.sub('', m.group(1).strip()).strip()
+        return {"title": title, "year": int(m.group(2))}
+    title = _EDITION_RE_PY.sub('', stem.strip()).strip()
+    return {"title": title, "year": None}
+
+
+def _imdb_search_sync(q: str, year: Optional[int], runtime: Optional[int], conn) -> list[dict]:
+    """Synchronous IMDb search — mirrors the async /imdb/search endpoint."""
+    q = q.strip()
+    if not q:
+        return []
+    q = re.sub(r'\.[a-zA-Z0-9]{2,5}$', '', q).strip()
+    if not q:
+        return []
+    q_norm = _norm_title(q)
+    cols  = ("t.tconst, t.primary_title, t.original_title, t.start_year, "
+             "t.runtime_minutes, t.genres, c.cast_names, r.average_rating, t.title_type")
+    keys  = ["tconst", "primary_title", "original_title", "start_year",
+             "runtime_minutes", "genres", "cast_names", "average_rating", "title_type"]
+    frm   = ("imdb_titles t "
+             "LEFT JOIN imdb_cast c ON t.tconst = c.tconst "
+             "LEFT JOIN imdb_ratings r ON t.tconst = r.tconst")
+    seen: set[str] = set()
+    results: list[dict] = []
+
+    def _rows(raw):
+        out = []
+        for row in raw:
+            d = dict(zip(keys, row))
+            if d["tconst"] not in seen:
+                seen.add(d["tconst"])
+                out.append(d)
+        return out
+
+    if year:
+        results += _rows(conn.execute(
+            f"SELECT {cols} FROM {frm} WHERE (t.norm_title=? OR t.norm_original_title=?) AND t.start_year=?",
+            (q_norm, q_norm, year)
+        ).fetchall())
+    if len(results) < 5:
+        results += _rows(conn.execute(
+            f"SELECT {cols} FROM {frm} WHERE t.norm_title=? OR t.norm_original_title=?"
+            " ORDER BY t.start_year DESC LIMIT 10",
+            (q_norm, q_norm)
+        ).fetchall())
+    if len(results) < 5:
+        try:
+            fts_q = '"' + q_norm.replace('"', '""') + '"'
+            results += _rows(conn.execute(
+                f"SELECT {cols} FROM {frm} WHERE t.rowid IN"
+                " (SELECT rowid FROM imdb_fts WHERE imdb_fts MATCH ?)"
+                " ORDER BY CASE WHEN t.start_year=? THEN 0 ELSE 1 END, t.start_year DESC LIMIT 20",
+                (fts_q, year or 0)
+            ).fetchall())
+        except Exception:
+            pass
+    if len(results) < 5:
+        results += _rows(conn.execute(
+            f"SELECT {cols} FROM {frm} WHERE t.norm_title LIKE ?"
+            " ORDER BY CASE WHEN t.start_year=? THEN 0 ELSE 1 END, t.start_year DESC LIMIT 20",
+            (f"%{q_norm}%", year or 0)
+        ).fetchall())
+
+    if runtime and results:
+        results.sort(key=lambda r: abs((r["runtime_minutes"] or 9999) - runtime))
+    return results[:20]
+
+
+def _pick_auto_candidate(results: list[dict], parsed: dict) -> Optional[dict]:
+    """Apply the same disambiguation logic as the JS auto-matcher."""
+    q_norm = _norm_title(parsed.get("searchTitle") or parsed["title"])
+    year   = parsed.get("year")
+    runtime = parsed.get("runtime")
+
+    exact = [r for r in results if
+             (_norm_title(r["primary_title"]) == q_norm or
+              (r["original_title"] and _norm_title(r["original_title"]) == q_norm)) and
+             (not year or r["start_year"] == year)]
+
+    pref = [r for r in exact if r.get("title_type") in _PREF_TYPES]
+    pool = pref if pref else exact
+
+    if len(pool) == 1:
+        return pool[0]
+    if len(pool) > 1 and runtime:
+        with_rt = [r for r in pool if r.get("runtime_minutes") is not None]
+        if with_rt:
+            best = min(with_rt, key=lambda r: abs(r["runtime_minutes"] - runtime))
+            if abs(best["runtime_minutes"] - runtime) <= 10:
+                same = [r for r in with_rt if abs(r["runtime_minutes"] - runtime) == abs(best["runtime_minutes"] - runtime)]
+                if len(same) == 1:
+                    return same[0]
+    return None
+
+
+def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
+    global _imdbscan_progress
+    _imdbscan_progress = {"phase": "running", "searched": 0, "total": 0,
+                          "auto": 0, "skipped": 0, "none": 0, "review": []}
+    try:
+        import sqlite3 as _sq3
+        app_conn  = _sq3.connect(DB_PATH)
+        imdb_conn = _sq3.connect(IMDB_DB_PATH)
+        imdb_conn.row_factory = None
+
+        # Collect all file paths, excluding already-matched ones unless force_rescan
+        if force_rescan:
+            paths = [r[0] for r in app_conn.execute("SELECT path FROM file_meta").fetchall()]
+        else:
+            matched = {r[0] for r in app_conn.execute("SELECT path FROM file_imdb").fetchall()}
+            paths   = [r[0] for r in app_conn.execute("SELECT path FROM file_meta").fetchall()
+                       if r[0] not in matched]
+
+        total = len(paths)
+        _imdbscan_progress["total"] = total
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _search_path(fpath: str):
+            parsed = _parse_filename_py(Path(fpath).name)
+            parsed["searchTitle"] = parsed["title"]
+            # Each worker gets its own DB connection (sqlite3 is not thread-safe for shared conn)
+            c = _sq3.connect(IMDB_DB_PATH)
+            try:
+                results = _imdb_search_sync(
+                    parsed["searchTitle"], parsed.get("year"),
+                    parsed.get("runtime"), c
+                )
+            finally:
+                c.close()
+            return fpath, parsed, results
+
+        # Phase 1: parallel searches
+        _imdbscan_progress["phase"] = "searching"
+        search_results: list[tuple] = [None] * total
+        futures = {}
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            for i, fpath in enumerate(paths):
+                futures[ex.submit(_search_path, fpath)] = i
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    search_results[i] = fut.result()
+                except Exception:
+                    search_results[i] = (paths[i], {}, [])
+                _imdbscan_progress["searched"] += 1
+
+        # Phase 2: auto-match unambiguous hits, collect review list
+        _imdbscan_progress["phase"] = "matching"
+        auto_items  = []
+        review_items = []
+
+        for fpath, parsed, results in search_results:
+            if fpath is None:
+                continue
+            if not results:
+                _imdbscan_progress["none"] += 1
+                continue
+            candidate = _pick_auto_candidate(results, parsed)
+            if candidate:
+                auto_items.append((fpath, candidate))
+            elif skip_manual:
+                _imdbscan_progress["skipped"] += 1
+            else:
+                q_norm = _norm_title(parsed.get("searchTitle") or parsed["title"])
+                year   = parsed.get("year")
+                exact  = [r for r in results if
+                          (_norm_title(r["primary_title"]) == q_norm or
+                           (r["original_title"] and _norm_title(r["original_title"]) == q_norm)) and
+                          (not year or r["start_year"] == year)]
+                review_items.append({
+                    "path": fpath,
+                    "filename": Path(fpath).name,
+                    "reason": f"{len(exact)} exact matches" if len(exact) > 1
+                              else ("no year in filename" if not year else "no exact match"),
+                    "results": (exact if exact else results)[:8],
+                })
+
+        # Write auto-matches to DB
+        def _write_match(fpath: str, r: dict):
+            c = _sq3.connect(DB_PATH)
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO file_imdb "
+                    "(path, tconst, primary_title, start_year, genres, runtime_minutes, source, rating) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (fpath, r["tconst"], r["primary_title"], r["start_year"],
+                     r["genres"], r["runtime_minutes"], "imdb", r.get("average_rating"))
+                )
+                c.commit()
+            finally:
+                c.close()
+
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            futs = {ex.submit(_write_match, fpath, r): fpath for fpath, r in auto_items}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                    _imdbscan_progress["auto"] += 1
+                except Exception as exc:
+                    log.warning("imdbscan write: %s", exc)
+                    _imdbscan_progress["skipped"] += 1
+
+        app_conn.close()
+        imdb_conn.close()
+
+        _imdbscan_progress["review"] = review_items
+        _imdbscan_progress["phase"]  = "done"
+    except Exception as exc:
+        _imdbscan_progress["phase"] = "error"
+        _imdbscan_progress["error"] = str(exc)
+        log.error("imdbscan thread: %s", exc)
 
 
 async def _init_imdb():
@@ -1259,6 +1492,60 @@ async def set_dates_progress_sse():
 @app.get("/imdb/set-dates-status")
 async def set_dates_status():
     return _setdates_progress
+
+
+@app.get("/imdb-scan")
+async def imdb_scan_page(request: Request):
+    return templates.TemplateResponse("imdb_scan.html", {
+        "request": request,
+        "ingress_path": _ingress_prefix(request),
+        "delete_token": DELETE_TOKEN,
+        "tmdb_configured": bool(_config.get("tmdb_api_key")),
+    })
+
+
+@app.post("/imdb/scan-bg")
+async def imdb_scan_bg(request: Request):
+    body = await request.json()
+    if _imdbscan_progress.get("phase") == "running":
+        return {"error": "Already running"}
+    import threading
+    threading.Thread(
+        target=_imdbscan_thread,
+        kwargs={"force_rescan": bool(body.get("force_rescan")),
+                "skip_manual":  bool(body.get("skip_manual", True))},
+        daemon=True,
+    ).start()
+    return {"started": True}
+
+
+def _imdbscan_summary() -> dict:
+    p = {k: v for k, v in _imdbscan_progress.items() if k != "review"}
+    p["review_count"] = len(_imdbscan_progress.get("review") or [])
+    return p
+
+
+@app.get("/imdb/scan-progress")
+async def imdb_scan_progress():
+    async def _gen():
+        while True:
+            p = _imdbscan_summary()
+            yield f"data: {json.dumps(p)}\n\n"
+            if p.get("phase") in ("done", "error", "idle"):
+                break
+            await asyncio.sleep(0.5)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/imdb/scan-status")
+async def imdb_scan_status():
+    return _imdbscan_summary()
+
+
+@app.get("/imdb/scan-review")
+async def imdb_scan_review():
+    return _imdbscan_progress.get("review", [])
 
 
 @app.get("/imdb/matches")
