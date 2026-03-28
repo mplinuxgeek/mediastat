@@ -19,12 +19,14 @@ options:
   directories:
     - label: Media
       path: /media
+  tmdb_api_key: ""
   log_level: "info"
 
 schema:
   directories:
     - label: str
       path: str
+  tmdb_api_key: str?
   log_level: list(debug|info|warning|error)
 
 # Port used when not using ingress
