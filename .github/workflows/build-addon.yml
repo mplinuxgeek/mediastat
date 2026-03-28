@@ -84,25 +84,22 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4.2.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
 
-      - name: Update version in ha-addon/config.yaml
+      - name: Bump version and push
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version: .*/version: \"${VERSION}\"/" ha-addon/config.yaml
-
-      - name: Commit updated config.yaml
-        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i "s/^version: .*/version: \"${VERSION}\"/" ha-addon/config.yaml
           git add ha-addon/config.yaml
           if git diff --cached --quiet; then
-            echo "No version change to commit"
+            echo "Version already set to ${VERSION} — nothing to commit"
             exit 0
           fi
-          git commit -m "chore: bump add-on version to ${GITHUB_REF_NAME#v}"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          git commit -m "chore: bump add-on version to ${VERSION}"
+          git push origin main
