@@ -1,6 +1,6 @@
 ---
 name: "MediaStat"
-version: "1.0.30"
+version: "1.0.32"
 slug: "mediastat"
 description: "Media browser, health checker and HandBrake transcoder for your library"
 url: "https://github.com/mplinuxgeek/mediastat"
