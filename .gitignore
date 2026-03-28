@@ -9,3 +9,4 @@ config.yaml
 ha-addon/main.py
 ha-addon/requirements.txt
 ha-addon/templates/
+ha-addon/static/

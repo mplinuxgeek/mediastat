@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
         ffmpeg \
+        mkvtoolnix \
         vainfo \
         libva-drm2 \
         libvpl2 \
@@ -39,9 +40,10 @@ RUN python3 -m venv /app/.venv \
 
 COPY main.py .
 COPY templates/ templates/
+COPY static/ static/
 
-# Ensure persistent data directory exists
-RUN mkdir -p /data
+# Ensure persistent data directories exist
+RUN mkdir -p /data /app/static
 
 # run.sh is the entrypoint for HA add-ons
 COPY ha-addon/run.sh /run.sh
