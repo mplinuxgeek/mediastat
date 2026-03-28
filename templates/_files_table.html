@@ -19,25 +19,17 @@
         <input type="checkbox" class="batch-cb" onclick="event.stopPropagation();updateBatchFab()">
     </span>
     <span class="file-name-cell">
-        <button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span>
+        <button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span> <span class="tag imdb-rating-badge" style="display:none"></span>
     </span>
-    <span class="file-meta">
-        <span class="tag {{ file.ext_class }}">{{ file.ext }}</span>
-        <span class="tag {{ file.size_class }}">{{ file.human_size }}</span>
-        {% if file.video_codec and file.video_codec != 'N/A' %}
-            <span class="tag {{ file.codec_class }}">{{ file.video_codec }}</span>
-            {% if file.width and file.height %}
-            <span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>
-            {% endif %}
-            <span class="tag {{ file.hdr_class }}">{{ file.hdr_type or 'SDR' }}</span>
-        {% endif %}
-        {% if file.audio_codec and file.audio_codec != 'N/A' %}
-        <span class="tag audio">{{ file.audio_codec }}</span>
-        {% endif %}
-        {% if file.duration_label %}
-        <span class="tag duration">{{ file.duration_label }}</span>
-        {% endif %}
-    </span>
+    <span class="badge-cell"><span class="tag {{ file.ext_class }}">{{ file.ext }}</span></span>
+    <span class="badge-cell"><span class="tag {{ file.size_class }}">{{ file.human_size }}</span></span>
+    <span class="badge-cell">{% if file.video_codec and file.video_codec != 'N/A' %}<span class="tag {{ file.codec_class }}">{{ file.video_codec }}</span>{% endif %}</span>
+    <span class="badge-cell">{% if file.width and file.height %}<span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>{% endif %}</span>
+    <span class="badge-cell">{% if file.video_codec and file.video_codec != 'N/A' %}<span class="tag {{ file.hdr_class }}">{{ file.hdr_type or 'SDR' }}</span>{% endif %}</span>
+    <span class="badge-cell">{% if file.audio_codec and file.audio_codec != 'N/A' %}<span class="tag audio">{{ file.audio_codec }}</span>{% endif %}</span>
+    <span class="badge-cell">{% if file.duration_label %}<span class="tag duration">{{ file.duration_label }}</span>{% endif %}</span>
+    <span class="badge-cell"><span class="tag imdb-tag" onclick="event.stopPropagation();_imdbTagClick(this)" title="IMDb">IMDb</span></span>
+
     <span class="file-search-cell">
         <button class="search-sites-btn" onclick="openSearchMenu(event,this)" title="Search sites">&#9906;</button>
     </span>

@@ -1,0 +1,412 @@
+    <div id="mediainfo-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMediaInfo()">
+        <div class="modal mediainfo-modal">
+            <div class="mediainfo-modal-header">
+                <span id="mediainfo-title" class="mediainfo-modal-title"></span>
+                <button class="player-close" onclick="closeMediaInfo()" title="Close">✕</button>
+            </div>
+            <div id="mediainfo-body" class="mediainfo-body">Loading…</div>
+        </div>
+    </div>
+
+    <div id="player-modal" class="player-overlay" style="display:none" onclick="if(event.target===this)closePlayer()">
+        <div class="player-inner">
+            <div class="player-header">
+                <span id="player-title" class="player-title"></span>
+                <span id="player-codec" class="player-codec"></span>
+                <button id="transcode-btn" class="btn player-transcode-btn" onclick="toggleTranscode()" title="Re-encode to HLS for browser compatibility — use if video or audio won't play">⚡ HLS stream</button>
+                <button class="player-close" onclick="closePlayer()" title="Close player">✕</button>
+            </div>
+            <video id="player-video" controls preload="metadata"></video>
+        </div>
+    </div>
+
+    <div id="search-settings-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeSearchSettings()">
+        <div class="modal" style="max-width:620px">
+            <div class="modal-title">Search Sites</div>
+            <div id="search-sites-list"></div>
+            <div style="margin-top:12px">
+                <div class="modal-hint">Use <code>{query}</code> as the search term placeholder (URL-encoded, spaces as <code>+</code>)</div>
+                <div class="search-add-row">
+                    <input id="new-search-name" class="modal-input" type="text" placeholder="Name" style="width:130px">
+                    <div style="display:flex;flex-direction:column;flex:1;gap:4px">
+                        <input id="new-search-url" class="modal-input" type="text" placeholder="https://example.com/search?q={query}" style="width:100%">
+                        <a href="#" style="font-size:var(--fs-xs);color:var(--muted);text-decoration:none;align-self:flex-start;cursor:pointer" title="Insert the {query} placeholder at the cursor position" onclick="event.preventDefault();const el=document.getElementById('new-search-url');const s=el.selectionStart,e=el.selectionEnd;el.setRangeText('{query}',s,e,'end');el.focus()">+ insert {query}</a>
+                    </div>
+                    <button class="btn" onclick="addSearchSite()">Add</button>
+                </div>
+            </div>
+            <div class="modal-actions" style="margin-top:16px">
+                <button class="btn" onclick="exportSearchSites()" title="Download sites as CSV">↓ Export CSV</button>
+                <label class="btn" title="Import sites from CSV" style="cursor:pointer">
+                    ↑ Import CSV<input id="search-import-file" type="file" accept=".csv,text/csv" style="display:none" onchange="importSearchSites(this)">
+                </label>
+                <button class="btn" onclick="closeSearchSettings()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="rename-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeRenameModal()">
+        <div class="modal" style="max-width:560px">
+            <div class="modal-title">Rename file</div>
+            <input id="rename-input" class="modal-input rename-modal-input" type="text" autocomplete="off" spellcheck="false">
+            <div class="rename-diff" id="rename-diff"></div>
+            <div class="modal-actions" style="margin-top:14px">
+                <button class="btn" onclick="closeRenameModal()" title="Cancel and close">Cancel</button>
+                <button class="btn" onclick="normaliseRename()" title="Auto-normalise: clean punctuation, fix spacing, title case">Normalise</button>
+                <button id="rename-confirm" class="btn btn-danger" onclick="confirmRename()" title="Apply the rename">Rename</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="delete-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeDeleteModal()">
+        <div class="modal">
+            <div class="modal-title">Delete file?</div>
+            <div class="modal-filename" id="modal-filename"></div>
+            <div class="modal-hint">Type <code>ok</code> to confirm</div>
+            <input id="modal-input" class="modal-input" type="text" autocomplete="off" spellcheck="false">
+            <div class="modal-actions">
+                <button class="btn" onclick="closeDeleteModal()" title="Cancel and close">Cancel</button>
+                <button id="modal-confirm" class="btn btn-danger" disabled onclick="confirmDelete()" title="Permanently delete this file">Delete</button>
+            </div>
+        </div>
+    </div>
+    <div id="encode-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEncodeModal()">
+        <div class="modal" style="max-width:640px">
+            <div class="modal-title">⚙ Encode: <span id="encode-modal-name" style="color:var(--muted);font-weight:normal"></span></div>
+            <div class="encode-presets">
+                <button class="encode-preset-btn" onclick="applyEncodePreset('fast')"     title="Fast encode — lower quality, much quicker">Fast</button>
+                <button class="encode-preset-btn" onclick="applyEncodePreset('balanced')" title="Balanced quality and speed">Balanced</button>
+                <button class="encode-preset-btn active" onclick="applyEncodePreset('quality')" title="High quality, slower encode (recommended)">Quality</button>
+                <button class="encode-preset-btn" onclick="applyEncodePreset('archive')" title="Maximum quality archival encode — very slow">Archive</button>
+            </div>
+            <div class="encode-field-grid">
+                <span class="encode-field-label">Quality (QP)</span>
+                <input id="enc-qp" type="number" min="10" max="51" value="18" class="modal-input" style="width:72px">
+                <span class="encode-field-hint">16 ≈ near-lossless · 18–20 high quality · 20–22 good · lower = better</span>
+
+                <span class="encode-field-label">Encoder speed</span>
+                <select id="enc-preset" class="modal-input">
+                    <option value="archive">Archive (veryslow)</option>
+                    <option value="quality">Quality (slow)</option>
+                    <option value="balanced">Balanced (medium)</option>
+                    <option value="fast">Fast</option>
+                    <option value="speed">Speed (veryfast)</option>
+                </select>
+                <span></span>
+
+                <span class="encode-field-label">Output format</span>
+                <select id="enc-format" class="modal-input" style="width:100px">
+                    <option value="mkv">MKV</option>
+                    <option value="mp4">MP4</option>
+                </select>
+                <span></span>
+
+                <span class="encode-field-label">Denoise</span>
+                <select id="enc-denoise" class="modal-input">
+                    <option value="">Off</option>
+                    <option value="ultralight">Ultralight</option>
+                    <option value="light">Light</option>
+                    <option value="medium">Medium</option>
+                    <option value="strong">Strong</option>
+                </select>
+                <span></span>
+
+                <span class="encode-field-label">Auto-crop</span>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:var(--fs-base)">
+                    <input id="enc-crop" type="checkbox"> Remove black bars
+                </label>
+                <span></span>
+
+                <span class="encode-field-label">Keep language</span>
+                <input id="enc-lang" class="modal-input" type="text" value="eng" maxlength="8" style="width:80px" placeholder="eng" spellcheck="false" autocomplete="off">
+                <span class="encode-field-hint">ISO 639-2 code · audio also keeps untagged streams</span>
+
+                <span class="encode-field-label">Target width</span>
+                <select id="enc-width" class="modal-input">
+                    <option value="">Original</option>
+                    <option value="3840">3840 (4K)</option>
+                    <option value="1920">1920 (1080p)</option>
+                    <option value="1280">1280 (720p)</option>
+                    <option value="854">854 (480p)</option>
+                </select>
+                <span class="encode-field-hint">Height scaled automatically · aspect ratio preserved</span>
+
+                <span class="encode-field-label">Codec</span>
+                <select id="enc-codec" class="modal-input">
+                    <option value="hevc">H.265 / HEVC</option>
+                    <option value="h264">H.264 / AVC</option>
+                    <option value="av1">AV1</option>
+                </select>
+                <span></span>
+
+                <span class="encode-field-label">GPU encoder</span>
+                <select id="enc-gpu" class="modal-input">
+                    <option value="auto">Auto (best available)</option>
+                    <option value="intel">Intel QSV / VAAPI</option>
+                    <option value="nvidia">NVIDIA NVENC</option>
+                    <option value="amd">AMD VCE / VCN</option>
+                    <option value="none">Software</option>
+                </select>
+                <span></span>
+            </div>
+            <input type="hidden" id="encode-file-path">
+            <div class="modal-actions">
+                <button class="btn" onclick="closeEncodeModal()" title="Cancel and close">Cancel</button>
+                <button class="btn btn-primary" onclick="startEncode()">⚙ Start Encode <span style="font-size:16px;line-height:1">›</span></button>
+            </div>
+        </div>
+    </div>
+
+    <div id="export-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeExportModal()">
+        <div class="modal export-modal" style="width:min(800px,95vw);max-width:min(800px,95vw)">
+            <div class="modal-title">Export File List</div>
+
+            <div class="export-presets">
+                <span class="export-section-label" style="align-self:center">presets:</span>
+                <button class="export-preset-btn" onclick="applyExportPreset('titles')">Titles only</button>
+                <button class="export-preset-btn" onclick="applyExportPreset('titles-paths')">Paths + Titles</button>
+                <button class="export-preset-btn" onclick="applyExportPreset('csv-all')">CSV (all fields)</button>
+                <button class="export-preset-btn" onclick="applyExportPreset('json')">JSON</button>
+            </div>
+
+            <div class="export-config">
+                <div class="export-config-col">
+                    <div class="export-section-label">format</div>
+                    <label><input type="radio" name="export-fmt" value="text" checked onchange="refreshExportPreview()"> Plain text</label>
+                    <label><input type="radio" name="export-fmt" value="csv"  onchange="refreshExportPreview()"> CSV</label>
+                    <label><input type="radio" name="export-fmt" value="json" onchange="refreshExportPreview()"> JSON</label>
+                </div>
+                <div class="export-config-col">
+                    <div class="export-section-label">scope</div>
+                    <label><input type="radio" name="export-scope" value="visible" checked onchange="refreshExportPreview()"> Visible files</label>
+                    <label><input type="radio" name="export-scope" value="all" onchange="refreshExportPreview()"> All loaded files</label>
+                </div>
+                <div class="export-config-col">
+                    <div class="export-section-label">fields</div>
+                    <label><input type="checkbox" id="ef-title"    checked onchange="refreshExportPreview()"> Title</label>
+                    <label><input type="checkbox" id="ef-filename"        onchange="refreshExportPreview()"> Filename</label>
+                    <label><input type="checkbox" id="ef-path"           onchange="refreshExportPreview()"> Full path</label>
+                    <label><input type="checkbox" id="ef-size"           onchange="refreshExportPreview()"> Size</label>
+                    <label><input type="checkbox" id="ef-vcodec"         onchange="refreshExportPreview()"> Video codec</label>
+                    <label><input type="checkbox" id="ef-res"            onchange="refreshExportPreview()"> Resolution</label>
+                    <label><input type="checkbox" id="ef-audio"          onchange="refreshExportPreview()"> Audio codec</label>
+                    <label><input type="checkbox" id="ef-duration"       onchange="refreshExportPreview()"> Duration</label>
+                </div>
+            </div>
+
+            <div id="export-preview" class="export-preview"></div>
+
+            <div class="modal-actions">
+                <span id="export-count" class="export-count"></span>
+                <button class="btn" onclick="copyExport()">Copy</button>
+                <button class="btn" onclick="downloadExport()">Download</button>
+                <button class="btn" onclick="closeExportModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="dupes-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeDupesModal()">
+        <div class="modal dupes-modal" style="width:min(1100px,95vw);max-width:min(1100px,95vw)">
+            <div class="modal-title">Duplicate Files</div>
+            <div id="dupes-body" class="dupes-scroll"></div>
+            <div class="modal-actions" style="margin-top:14px">
+                <label style="font-size:13px;color:var(--muted);margin-right:auto;display:flex;align-items:center;gap:6px;">
+                    threshold:
+                    <input id="dupes-threshold" type="range" min="70" max="99" value="90" style="width:90px" oninput="document.getElementById('dupes-threshold-val').textContent=this.value+'%'">
+                    <span id="dupes-threshold-val">90%</span>
+                </label>
+                <button class="btn" onclick="runDupesScan()">Rescan</button>
+                <button class="btn" onclick="closeDupesModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <button id="batch-fab" class="batch-fab" onclick="startBatchEncode()">
+        ⚙ Encode <span id="batch-fab-count">0</span> selected
+    </button>
+    <button id="batch-delete-fab" class="batch-fab danger" onclick="startBatchDelete()">
+        ✕ Delete <span id="batch-delete-fab-count">0</span> selected
+    </button>
+    <button id="batch-move-fab" class="batch-fab move-folder" onclick="startBatchMove()">
+        ⤴ Move to folder
+    </button>
+
+    <div id="batch-move-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeBatchMoveModal()">
+        <div class="modal">
+            <div class="modal-title">Move <span id="batch-move-count"></span> to folder</div>
+            <div class="modal-hint">New subfolder name (created inside the current directory)</div>
+            <input id="batch-move-input" class="modal-input" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="e.g. Director Name"
+                   oninput="document.getElementById('batch-move-confirm').disabled = !this.value.trim()"
+                   onkeydown="if(event.key==='Enter'&&this.value.trim())confirmBatchMove()">
+            <div class="modal-actions">
+                <button class="btn" onclick="closeBatchMoveModal()">Cancel</button>
+                <button id="batch-move-confirm" class="btn" disabled onclick="confirmBatchMove()">Move</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="batch-delete-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeBatchDeleteModal()">
+        <div class="modal">
+            <div class="modal-title">Delete <span id="batch-delete-count"></span>?</div>
+            <div class="modal-filename" id="batch-delete-names" style="max-height:120px;overflow-y:auto;font-size:12px;line-height:1.8"></div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Frees <span id="batch-delete-size" style="color:var(--text)"></span></div>
+            <div class="modal-hint">Type <code>ok</code> to confirm</div>
+            <input id="batch-delete-input" class="modal-input" type="text" autocomplete="off" spellcheck="false"
+                   oninput="document.getElementById('batch-delete-confirm').disabled = this.value.trim().toLowerCase() !== 'ok'">
+            <div class="modal-actions">
+                <button class="btn" onclick="closeBatchDeleteModal()">Cancel</button>
+                <button id="batch-delete-confirm" class="btn btn-danger" disabled onclick="confirmBatchDelete()">Delete all</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- IMDB management modal -->
+    <div id="imdb-mgmt-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeImdbMgmtModal()">
+        <div class="modal" style="width:min(720px,95vw);max-width:min(720px,95vw)">
+            <div class="modal-title" style="display:flex;align-items:center">
+                <span style="flex:1">⬡ IMDB</span>
+                <a id="imdb-mgmt-db-link" href="#" style="font-size:var(--fs-xs);color:var(--muted);text-decoration:none;margin-right:10px" title="Manage databases">⬡ DB →</a>
+                <button class="modal-close-x" id="imdb-auto-close-btn" onclick="closeImdbMgmtModal()" title="Close">✕</button>
+            </div>
+
+            <!-- Auto-match panel (shown while running) -->
+            <div id="imdb-auto-panel" style="display:none">
+                <div class="imdb-status-row" style="margin-bottom:6px">
+                    <span id="imdb-auto-msg" style="font-size:var(--fs-sm);color:var(--muted)">Starting…</span>
+                    <div class="imdb-progress-bar"><div class="imdb-progress-fill" id="imdb-auto-fill"></div></div>
+                    <span id="imdb-auto-pct" style="font-size:var(--fs-xs);color:var(--muted);width:36px;text-align:right"></span>
+                </div>
+                <div class="imdb-auto-stats">
+                    <span>Auto: <b id="iam-auto">0</b></span>
+                    <span>Manual: <b id="iam-manual">0</b></span>
+                    <span>Skipped: <b id="iam-skipped">0</b></span>
+                    <span>No result: <b id="iam-none">0</b></span>
+                </div>
+                <!-- Prompt for ambiguous files -->
+                <div id="imdb-auto-prompt" class="imdb-auto-prompt" style="display:none">
+                    <div class="imdb-auto-prompt-title" id="imdb-auto-prompt-reason"></div>
+                    <div class="imdb-auto-prompt-file" id="imdb-auto-prompt-file"></div>
+                    <div class="imdb-auto-results" id="imdb-auto-results"></div>
+                    <div style="display:flex;gap:6px;margin-bottom:8px">
+                        <input id="imdb-auto-search-input" class="modal-input" type="text" placeholder="Search by title or IMDb ID (tt…)" style="flex:1;padding:5px 8px"
+                            onkeydown="if(event.key==='Enter')_autoManualSearch()">
+                        <button class="btn" onclick="_autoManualSearch()" title="Search IMDb for this title">Search</button>
+                    </div>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn" onclick="_imdbAutoSkip()" title="Skip this file and continue to the next">Skip</button>
+                        <button class="btn" id="imdb-auto-match-btn" disabled onclick="_imdbAutoConfirm()" title="Confirm the selected match and continue">✓ Match</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bulk rename panel (shown while running) -->
+            <div id="imdb-rename-panel" style="display:none">
+                <div class="imdb-status-row" style="margin-bottom:6px">
+                    <span id="imdb-rename-msg" style="font-size:var(--fs-sm);color:var(--muted)">Starting…</span>
+                    <div class="imdb-progress-bar"><div class="imdb-progress-fill" id="imdb-rename-fill"></div></div>
+                    <span id="imdb-rename-pct" style="font-size:var(--fs-xs);color:var(--muted);width:36px;text-align:right"></span>
+                </div>
+                <div class="imdb-auto-stats">
+                    <span>Renamed: <b id="irn-renamed">0</b></span>
+                    <span>Already correct: <b id="irn-skipped">0</b></span>
+                    <span>Failed: <b id="irn-failed">0</b></span>
+                </div>
+            </div>
+
+            <div class="imdb-options-panel">
+                <div class="imdb-options-grid">
+                    <label class="imdb-option-label">
+                        <input type="checkbox" id="imdb-skip-manual">
+                        <span>
+                            <strong>Skip manual matches</strong>
+                            <em>Don't re-process files you've matched by hand</em>
+                        </span>
+                    </label>
+                    <label class="imdb-option-label">
+                        <input type="checkbox" id="imdb-set-metadata" checked>
+                        <span>
+                            <strong>Write file metadata</strong>
+                            <em>Embed title, year, genres &amp; IMDb ID into the file</em>
+                        </span>
+                    </label>
+                    <label class="imdb-option-label">
+                        <input type="checkbox" id="imdb-force-rescan">
+                        <span>
+                            <strong>Force rescan</strong>
+                            <em>Re-process even already-matched files</em>
+                        </span>
+                    </label>
+                    <label class="imdb-option-label">
+                        <input type="checkbox" id="imdb-set-dates" checked>
+                        <span>
+                            <strong>Set file dates</strong>
+                            <em>Set mtime to the release date (day-accurate if matched via TMDB)</em>
+                        </span>
+                    </label>
+                    <label class="imdb-option-label" id="imdb-bulk-tmdb-row" style="display:none">
+                        <input type="checkbox" id="imdb-bulk-use-tmdb" checked>
+                        <span>
+                            <strong>Enrich dates via TMDB</strong>
+                            <em>After local IMDb match, fetch full release date (day/month/year) from TMDB in the background</em>
+                        </span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="imdb-auto-btn" onclick="startAutoMatch()" title="Automatically match unmatched files to IMDb titles">⟳ Auto-match</button>
+                <button class="btn" id="imdb-rename-btn" onclick="startImdbBulkRename()" title="Rename matched files to IMDb canonical titles">✎ Bulk rename</button>
+                <button class="btn" id="imdb-dates-btn" onclick="startImdbSetDates()" title="Set file mtime to January 1 of each file's IMDb release year">📅 Set dates</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- IMDb detail popup (singleton, repositioned on open) -->
+    <div id="imdb-popup" class="imdb-popup" style="display:none"></div>
+
+    <!-- IMDB search/match modal -->
+    <div id="imdb-search-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeImdbModal()">
+        <div class="modal" style="min-width:500px;max-width:620px">
+            <div class="modal-title" style="display:flex;align-items:center;gap:10px">
+                <span>⬡ Match to</span>
+                <span id="imdb-source-toggle" style="display:none;gap:4px">
+                    <button class="btn active" id="src-btn-imdb" onclick="_setSearchSource('imdb')" title="Search local IMDb dataset (no API key required)">IMDb</button>
+                    <button class="btn" id="src-btn-tmdb" onclick="_setSearchSource('tmdb')" title="Search TMDB — requires API key in config.yaml">TMDB</button>
+                </span>
+                <span id="imdb-source-label">IMDb</span>
+            </div>
+            <div style="font-size:var(--fs-xs);color:var(--muted);margin-bottom:10px" id="imdb-filename-hint"></div>
+            <div class="imdb-search-row">
+                <input id="imdb-q" class="modal-input" type="text" placeholder="Title" style="margin:0"
+                       oninput="imdbSearchDebounced()" onkeydown="if(event.key==='Enter')imdbSearch()">
+                <input id="imdb-year" class="modal-input imdb-year-input" type="number" placeholder="Year" style="margin:0"
+                       oninput="imdbSearchDebounced()" onkeydown="if(event.key==='Enter')imdbSearch()">
+                <button class="btn" onclick="imdbSearch()" title="Search">Search</button>
+            </div>
+            <div id="imdb-result-list" class="imdb-result-list"></div>
+            <div class="modal-actions">
+                <button class="btn" onclick="closeImdbModal()" title="Cancel and close">Cancel</button>
+                <button class="btn" id="imdb-unmatch-btn" style="display:none" onclick="imdbUnmatch()" title="Remove the existing match for this file">✕ Remove match</button>
+                <button class="btn" id="imdb-setdate-btn" style="display:none" onclick="imdbSetDate()" title="Set file mtime to the matched release date">📅 Set date</button>
+                <button class="btn" id="imdb-match-btn" disabled onclick="imdbConfirmMatch()" title="Confirm selected match">✓ Match</button>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="health-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeHealthModal()">
+        <div class="modal health-modal">
+            <div class="modal-title">✦ Health Check</div>
+            <div class="health-progress">
+                <div class="health-bar-row">
+                    <div class="health-bar"><div id="health-bar-fill" class="health-bar-fill" style="width:0%"></div></div>
+                    <span id="health-pct" class="health-pct">0 / 0</span>
+                </div>
+            </div>
+            <div id="health-body" class="health-issues"></div>
+            <div class="modal-actions" style="margin-top:14px">
+                <button id="health-rescan-btn" class="btn" onclick="runHealthCheck()" title="Scan all loaded files for issues">↺ Scan</button>
+                <button class="btn" onclick="closeHealthModal()" title="Close">Close</button>
+            </div>
+        </div>
+    </div>

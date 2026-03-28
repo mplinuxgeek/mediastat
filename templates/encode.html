@@ -16,13 +16,19 @@
             --green:    #3fb950;
             --yellow:   #d29922;
             --red:      #f47474;
+
+            --fs-xs:   15px;
+            --fs-sm:   16px;
+            --fs-base: 17px;
+            --fs-md:   18px;
+            --fs-lg:   20px;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             background: var(--bg);
             color: var(--text);
             font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-            font-size: 14px;
+            font-size: var(--fs-base);
             line-height: 1.5;
             min-height: 100vh;
         }
@@ -34,19 +40,19 @@
             display: flex; align-items: center; gap: 16px;
         }
         .back-link {
-            color: var(--muted); text-decoration: none; font-size: 13px;
+            color: var(--muted); text-decoration: none; font-size: var(--fs-sm);
             transition: color 0.1s;
         }
         .back-link:hover { color: var(--accent); }
-        .page-title { color: var(--text); font-size: 15px; font-weight: 600; }
+        .page-title { color: var(--text); font-size: var(--fs-md); font-weight: 600; }
         .hw-status {
-            margin-left: auto; font-size: 12px; color: var(--muted);
+            margin-left: auto; font-size: var(--fs-sm); color: var(--muted);
             display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
         }
         .hw-chip {
             display: inline-flex; align-items: center; gap: 4px;
             padding: 2px 8px; border-radius: 4px;
-            border: 1px solid var(--border); font-size: 11px;
+            border: 1px solid var(--border); font-size: var(--fs-xs);
         }
         .hw-chip.ok   { color: var(--green);  border-color: #1e4d27; background: rgba(63,185,80,0.06); }
         .hw-chip.warn { color: var(--muted);  border-color: var(--border); }
@@ -55,7 +61,7 @@
         main { padding: 20px; max-width: 900px; }
 
         .no-jobs {
-            color: var(--muted); font-size: 13px; padding: 40px 0;
+            color: var(--muted); font-size: var(--fs-sm); padding: 40px 0;
             text-align: center;
         }
         .no-jobs a { color: var(--accent); text-decoration: none; }
@@ -77,7 +83,7 @@
             display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
         }
         .job-badge {
-            font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+            font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.5px;
             padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
             text-transform: uppercase;
         }
@@ -89,14 +95,14 @@
         .badge-hw        { background: rgba(63,185,80,0.10); color: var(--green); border: 1px solid #2d4a2d; }
         .badge-sw        { background: rgba(210,153,34,0.10); color: var(--yellow); border: 1px solid #4a3a10; }
 
-        .job-name { flex: 1; font-size: 13px; min-width: 0; overflow: hidden; }
+        .job-name { flex: 1; font-size: var(--fs-base); min-width: 0; overflow: hidden; }
         .job-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .job-name .input-name { color: var(--muted); font-size: 11px; margin-top: 1px; }
+        .job-name .input-name { color: var(--muted); font-size: var(--fs-xs); margin-top: 1px; }
 
         .job-action-btn {
             background: transparent; border: 1px solid var(--border);
             color: var(--muted); cursor: pointer; font-family: inherit;
-            font-size: 12px; padding: 3px 10px; border-radius: 4px;
+            font-size: var(--fs-sm); padding: 3px 10px; border-radius: 4px;
             flex-shrink: 0; transition: border-color 0.1s, color 0.1s;
         }
         .job-action-btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -107,12 +113,37 @@
         .job-action-btn.move:hover  { background: rgba(227,179,65,0.08); border-color: #e3b341; }
         .job-action-btn.move.armed  { color: var(--red); border-color: var(--red); background: rgba(248,81,73,0.08); }
         .job-action-btn.moved-done  { color: var(--muted); border-color: var(--border); cursor: default; }
+        .job-action-btn.play  { color: var(--accent); border-color: #1a3a5c; }
+        .job-action-btn.play:hover  { background: rgba(88,166,255,0.08); border-color: var(--accent); }
 
-        .job-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+        /* ── Preview modal ── */
+        .preview-overlay {
+            display: none; position: fixed; inset: 0; z-index: 200;
+            background: rgba(0,0,0,0.85);
+            align-items: center; justify-content: center;
+        }
+        .preview-overlay.open { display: flex; }
+        .preview-box {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 16px;
+            display: flex; flex-direction: column; gap: 12px;
+            max-width: min(960px, 95vw); width: 100%;
+        }
+        .preview-title {
+            font-size: var(--fs-sm); color: var(--muted);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .preview-box video {
+            width: 100%; border-radius: 6px; background: #000;
+            max-height: 70vh;
+        }
+        .preview-actions { display: flex; justify-content: flex-end; }
+
+        .job-meta { font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
         .job-meta span { margin-right: 12px; }
         .job-mediainfo {
             display: flex; align-items: center; gap: 6px;
-            font-size: 11px; margin-bottom: 10px;
+            font-size: var(--fs-xs); margin-bottom: 10px;
         }
         .mi-src    { color: var(--muted); }
         .mi-arrow  { color: var(--border); }
@@ -133,71 +164,24 @@
         }
         .job-bar-fill.done   { background: var(--green); }
         .job-bar-fill.failed { background: var(--red); }
-        .job-pct { font-size: 12px; color: var(--muted); width: 44px; text-align: right; flex-shrink: 0; }
+        .job-pct { font-size: var(--fs-sm); color: var(--muted); width: 44px; text-align: right; flex-shrink: 0; }
 
-        .job-stats { font-size: 12px; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
+        .job-stats { font-size: var(--fs-sm); color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
         .job-stats .stat-val { color: var(--text); }
         .job-stats .stat-green { color: var(--green); }
         .job-stats .stat-red   { color: var(--red); }
 
-        .job-error { font-size: 12px; color: var(--red); margin-top: 6px; }
+        .job-error { font-size: var(--fs-sm); color: var(--red); margin-top: 6px; }
 
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
         .badge-running { animation: pulse 2s ease-in-out infinite; }
-
-        /* ── System info panel ── */
-        .sysinfo {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            margin-bottom: 20px;
-            overflow: hidden;
-        }
-        .sysinfo summary {
-            list-style: none;
-            display: flex; align-items: center; gap: 8px;
-            padding: 10px 14px;
-            cursor: pointer;
-            font-size: 12px; color: var(--muted);
-            user-select: none;
-            background: var(--surface);
-        }
-        .sysinfo summary::-webkit-details-marker { display: none; }
-        .sysinfo summary:hover { color: var(--text); }
-        .sysinfo summary .si-chevron {
-            font-size: 9px; display: inline-block;
-            transition: transform 0.15s;
-        }
-        .sysinfo[open] summary .si-chevron { transform: rotate(90deg); }
-        .sysinfo-body {
-            padding: 14px 16px;
-            border-top: 1px solid var(--border);
-            background: var(--surface);
-        }
-        .si-section { margin-bottom: 14px; }
-        .si-section:last-child { margin-bottom: 0; }
-        .si-heading {
-            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
-            color: var(--border); margin-bottom: 8px;
-        }
-        .si-row {
-            display: flex; align-items: center; gap: 10px;
-            font-size: 12px; margin-bottom: 5px;
-        }
-        .si-row:last-child { margin-bottom: 0; }
-        .si-label { color: var(--muted); width: 140px; flex-shrink: 0; }
-        .si-val   { color: var(--text); }
-        .si-ok    { color: var(--green); }
-        .si-warn  { color: var(--muted); }
-        .si-err   { color: var(--red); }
-        .si-note  { font-size: 11px; color: var(--muted); margin-left: 6px; }
-        .si-loading { color: var(--muted); font-size: 12px; font-style: italic; }
 
         /* ── Stats bar ── */
         .stats-bar {
             display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
             padding: 10px 14px; margin-bottom: 16px;
             background: var(--surface); border: 1px solid var(--border);
-            border-radius: 8px; font-size: 12px; color: var(--muted);
+            border-radius: 8px; font-size: var(--fs-sm); color: var(--muted);
         }
         .stats-bar .sv { color: var(--text); font-weight: 500; margin-left: 4px; }
         .stats-bar .sv.green { color: var(--green); }
@@ -209,36 +193,51 @@
         }
         .schedule-panel summary {
             list-style: none; display: flex; align-items: center; gap: 8px;
-            padding: 10px 14px; cursor: pointer; font-size: 12px; color: var(--muted);
+            padding: 10px 14px; cursor: pointer; font-size: var(--fs-sm); color: var(--muted);
             user-select: none; background: var(--surface);
         }
         .schedule-panel summary::-webkit-details-marker { display: none; }
         .schedule-panel summary:hover { color: var(--text); }
-        .schedule-panel .si-chevron { font-size: 9px; display: inline-block; transition: transform 0.15s; }
+        .schedule-panel .si-chevron { font-size: var(--fs-xs); display: inline-block; transition: transform 0.15s; }
         .schedule-panel[open] summary .si-chevron { transform: rotate(90deg); }
         .schedule-body {
             padding: 14px 16px; border-top: 1px solid var(--border);
             background: var(--surface);
         }
         .schedule-row {
-            display: flex; align-items: center; gap: 12px; font-size: 13px;
+            display: flex; align-items: center; gap: 12px; font-size: var(--fs-base);
             margin-bottom: 10px;
         }
         .schedule-row:last-child { margin-bottom: 0; }
         .schedule-label { color: var(--muted); width: 120px; flex-shrink: 0; }
         .schedule-input {
             background: var(--bg); border: 1px solid var(--border); color: var(--text);
-            padding: 3px 8px; border-radius: 4px; font-family: inherit; font-size: 13px;
+            padding: 3px 8px; border-radius: 4px; font-family: inherit; font-size: var(--fs-base);
             width: 80px; outline: none;
         }
         .schedule-input:focus { border-color: var(--accent); }
-        .schedule-status { font-size: 12px; color: var(--muted); margin-left: auto; }
+        .schedule-status { font-size: var(--fs-sm); color: var(--muted); margin-left: auto; }
         .schedule-status.active { color: var(--green); }
         .schedule-status.waiting { color: var(--yellow); }
 
+        /* ── Set Dates panel ── */
+        .setdates-progress {
+            margin-top: 10px;
+        }
+        .setdates-bar-wrap {
+            height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; margin-bottom: 6px;
+        }
+        .setdates-bar-fill {
+            height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+        }
+        .setdates-stats { font-size: var(--fs-xs); color: var(--muted); }
+        .setdates-stats span { margin-right: 14px; }
+        .setdates-stats .sd-updated { color: var(--green); }
+        .setdates-stats .sd-error   { color: var(--red); }
+
         /* ── Reorder buttons ── */
         .job-action-btn.reorder {
-            padding: 3px 6px; font-size: 11px;
+            padding: 3px 6px; font-size: var(--fs-xs);
         }
         .job-action-btn.reorder:disabled { opacity: 0.25; cursor: default; border-color: transparent; }
     </style>
@@ -256,12 +255,12 @@
         <summary>
             <span class="si-chevron">&#9654;</span>
             Encode Schedule
-            <span id="schedule-summary-status" style="margin-left:6px;font-size:11px"></span>
+            <span id="schedule-summary-status" style="margin-left:6px;font-size:var(--fs-xs)"></span>
         </summary>
         <div class="schedule-body">
             <div class="schedule-row">
                 <span class="schedule-label">Enable schedule</span>
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:var(--fs-base)">
                     <input type="checkbox" id="sched-enabled" style="accent-color:var(--accent)" onchange="saveSchedule()">
                     Only encode during specified hours
                 </label>
@@ -269,24 +268,37 @@
             <div class="schedule-row">
                 <span class="schedule-label">Start hour</span>
                 <input type="number" id="sched-start" class="schedule-input" min="0" max="23" value="22" onchange="saveSchedule()">
-                <span style="color:var(--muted);font-size:12px">to</span>
+                <span style="color:var(--muted);font-size:var(--fs-sm)">to</span>
                 <input type="number" id="sched-end" class="schedule-input" min="0" max="23" value="6" onchange="saveSchedule()">
                 <span id="sched-active-status" class="schedule-status"></span>
             </div>
-            <div style="font-size:11px;color:var(--muted);margin-top:6px">
+            <div style="font-size:var(--fs-xs);color:var(--muted);margin-top:6px">
                 Hours in 24h format. Overnight ranges supported (e.g. 22:00–06:00).
                 The worker checks every 60 s when outside the window.
             </div>
         </div>
     </details>
 
-    <details class="sysinfo" id="sysinfo-panel" ontoggle="onSysinfoToggle(this)">
+    <details class="schedule-panel" id="setdates-panel">
         <summary>
             <span class="si-chevron">&#9654;</span>
-            System Info
+            Set Release Dates
+            <span id="setdates-summary-status" style="margin-left:6px;font-size:var(--fs-xs);color:var(--muted)"></span>
         </summary>
-        <div class="sysinfo-body" id="sysinfo-body">
-            <span class="si-loading">Loading…</span>
+        <div class="schedule-body">
+            <div class="schedule-row">
+                <span class="schedule-label">Action</span>
+                <button class="job-action-btn" id="setdates-btn" onclick="startSetDates()">▶ Run</button>
+                <span style="font-size:var(--fs-xs);color:var(--muted);margin-left:10px">Sets each matched file's mtime to its IMDb release date. Skips files already set correctly.</span>
+            </div>
+            <div id="setdates-progress" class="setdates-progress" style="display:none">
+                <div class="setdates-bar-wrap"><div class="setdates-bar-fill" id="setdates-bar"></div></div>
+                <div class="setdates-stats" id="setdates-stats"></div>
+                <details id="setdates-error-details" style="display:none;margin-top:8px">
+                    <summary style="cursor:pointer;font-size:var(--fs-xs);color:var(--red)">Show errors</summary>
+                    <pre id="setdates-error-log" style="margin-top:6px;font-size:12px;color:var(--muted);max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></pre>
+                </details>
+            </div>
         </div>
     </details>
 
@@ -296,6 +308,16 @@
         <a href="{{ ingress_path }}/">Start an encode from the media browser →</a>
     </div>
 </main>
+
+<div id="preview-overlay" class="preview-overlay" onclick="closePreview(event)">
+    <div class="preview-box" onclick="event.stopPropagation()">
+        <div class="preview-title" id="preview-title"></div>
+        <video id="preview-video" controls preload="metadata"></video>
+        <div class="preview-actions">
+            <button class="job-action-btn" onclick="closePreview()">✕ Close</button>
+        </div>
+    </div>
+</div>
 
 <script>
 const DELETE_TOKEN = "{{ delete_token }}";
@@ -457,7 +479,9 @@ function buildCard(job) {
         const moveBtn = job.moved
             ? `<button class="job-action-btn moved-done" disabled title="Original replaced">↔ Moved</button>`
             : `<button class="job-action-btn move" id="move-${job.id}" onclick="moveJob('${job.id}')" title="Replace original with output">↔ Move</button>`;
-        action = moveBtn
+        const playBtn = `<button class="job-action-btn play" onclick="openPreview(${JSON.stringify(job.output_path)}, ${JSON.stringify(job.output_name)})" title="Preview encoded file">▶ Preview</button>`;
+        action = playBtn
+               + ` ` + moveBtn
                + `<button class="job-action-btn" onclick="dismissJob('${job.id}')" style="margin-left:4px">✕ Dismiss</button>`;
     }
 
@@ -614,76 +638,23 @@ function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// ── System info ───────────────────────────────────────────────────────────────
-let _sysinfoLoaded = false;
-
-function onSysinfoToggle(el) {
-    if (el.open && !_sysinfoLoaded) loadSysinfo();
+// ── Preview modal ─────────────────────────────────────────────────────────────
+function openPreview(outputPath, outputName) {
+    const overlay = document.getElementById('preview-overlay');
+    const video   = document.getElementById('preview-video');
+    const title   = document.getElementById('preview-title');
+    title.textContent = outputName || outputPath;
+    video.src = BASE_PATH + '/stream?path=' + encodeURIComponent(outputPath);
+    overlay.classList.add('open');
 }
 
-async function loadSysinfo() {
-    _sysinfoLoaded = true;
-    const body = document.getElementById('sysinfo-body');
-    try {
-        const resp = await fetch('/encode/info');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const d = await resp.json();
-        body.innerHTML = renderSysinfo(d);
-    } catch (e) {
-        body.innerHTML = `<span class="si-err">Failed to load: ${escHtml(e.message)}</span>`;
-    }
-}
-
-function renderSysinfo(d) {
-    const ok   = (t, note) => `<span class="si-ok">✓ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
-    const warn = (t, note) => `<span class="si-warn">✗ ${t}</span>${note ? `<span class="si-note">${note}</span>` : ''}`;
-    const row  = (label, content) => `<div class="si-row"><span class="si-label">${label}</span>${content}</div>`;
-    const sec  = (title, rows) => `<div class="si-section"><div class="si-heading">${title}</div>${rows}</div>`;
-
-    const hw  = d.hw  || {};
-    const ffe = d.ff_encoders || {};
-    const ffVer = d.versions?.ffmpeg;
-    const fpVer = d.versions?.ffprobe;
-
-    const versions = [
-        row('ffmpeg',  ffVer ? ok(escHtml(ffVer)) : warn('Not found')),
-        row('ffprobe', fpVer ? ok(escHtml(fpVer)) : warn('Not found')),
-    ].join('');
-
-    const hwRows = [
-        row('Intel QSV / VAAPI', hw.vaapi ? ok('Present') : warn('Not detected')),
-        row('NVIDIA NVENC',      hw.nvenc ? ok('Present') : warn('Not detected')),
-        row('AMD VAAPI',         hw.amd   ? ok('Present') : warn('Not detected')),
-    ].join('');
-
-    const ffEncRow = (label, hwKey, ffKey) => {
-        const hwOk = hw[hwKey], ffOk = ffe[ffKey];
-        if (ffOk && hwOk) return row(label, ok('Ready', 'compiled in · hardware present'));
-        if (ffOk && !hwOk) return row(label, `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`);
-        if (!ffOk && hwOk) return row(label, warn('Not compiled in', 'hardware present but this ffmpeg build lacks support'));
-        return row(label, warn('Not available'));
-    };
-    const hbEncRows = [
-        ffEncRow('hevc_vaapi (Intel/AMD)', 'vaapi', 'vaapi'),
-        ffEncRow('hevc_nvenc (NVIDIA)',    'nvenc',  'nvenc'),
-        row('libx265 (software)',          ffe.libx265 ? ok('Available') : warn('Not compiled in')),
-    ].join('');
-
-    const drv = d.drivers || {};
-    const driList = (drv.dri_devices || []).map(d => d.replace('/dev/dri/','')).join(', ') || 'none';
-    const driverRows = [
-        row('/dev/dri devices',    driList !== 'none' ? ok(escHtml(driList)) : warn('none', 'no DRM render nodes — GPU passthrough not enabled')),
-        row('VA-API driver',       drv.vaapi_driver   ? ok(escHtml(drv.vaapi_driver), drv.vaapi_profiles ? `${drv.vaapi_profiles} profiles` : '') : warn('not loaded', 'check VA-API driver install')),
-        row('Intel iHD driver',    drv.intel_iHD  ? ok('iHD_drv_video.so') : warn('not found', 'install intel-media-va-driver-non-free')),
-        row('Intel i965 driver',   drv.intel_i965 ? ok('i965_drv_video.so') : warn('not found', 'optional — older Intel GPUs only')),
-        row('Mesa VA driver',      drv.mesa_va    ? ok('present') : warn('not found', 'optional — AMD / software')),
-        row('Intel oneVPL (libvpl)',drv.libvpl     ? ok('libvpl.so') : warn('not found', 'install libvpl2 for QSV')),
-    ].join('');
-
-    return sec('Components', versions)
-         + sec('Hardware Detected', hwRows)
-         + sec('Media Drivers', driverRows)
-         + sec('ffmpeg Encoder Support', hbEncRows);
+function closePreview(event) {
+    if (event && event.target !== document.getElementById('preview-overlay')) return;
+    const overlay = document.getElementById('preview-overlay');
+    const video   = document.getElementById('preview-video');
+    overlay.classList.remove('open');
+    video.pause();
+    video.src = '';
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -769,6 +740,87 @@ async function saveSchedule() {
         body: JSON.stringify(cfg),
     });
 }
+
+// ── Set Dates ─────────────────────────────────────────────────────────────────
+let _setDatesEs = null;
+
+async function loadSetDatesStatus() {
+    try {
+        const r = await fetch('/imdb/set-dates-status');
+        if (r.ok) _applySetDatesProgress(await r.json());
+    } catch (_) {}
+}
+
+function _applySetDatesProgress(p) {
+    const btn     = document.getElementById('setdates-btn');
+    const progDiv = document.getElementById('setdates-progress');
+    const bar     = document.getElementById('setdates-bar');
+    const stats   = document.getElementById('setdates-stats');
+    const summary = document.getElementById('setdates-summary-status');
+
+    const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+    const running = p.phase === 'running';
+
+    progDiv.style.display = p.phase === 'idle' ? 'none' : '';
+    bar.style.width = pct + '%';
+    if (p.phase === 'error') bar.style.background = 'var(--red)';
+    else if (p.phase === 'done') bar.style.background = 'var(--green)';
+    else bar.style.background = 'var(--accent)';
+
+    if (p.phase !== 'idle') {
+        stats.innerHTML =
+            `<span>${p.done} / ${p.total}</span>` +
+            `<span class="sd-updated">✓ ${p.updated} updated</span>` +
+            `<span>⤼ ${p.skipped} skipped</span>` +
+            (p.errors ? `<span class="sd-error">✗ ${p.errors} errors</span>` : '');
+    }
+    const errDetails = document.getElementById('setdates-error-details');
+    const errLog     = document.getElementById('setdates-error-log');
+    if (p.error_log && p.error_log.length > 0) {
+        errDetails.style.display = '';
+        errDetails.querySelector('summary').textContent = `Show ${p.error_log.length} error(s)`;
+        errLog.textContent = p.error_log.join('\n');
+    } else {
+        errDetails.style.display = 'none';
+    }
+
+    if (p.phase === 'done') {
+        summary.textContent = `last run: ${p.updated} updated, ${p.skipped} skipped`;
+        summary.style.color = 'var(--green)';
+    } else if (p.phase === 'error') {
+        summary.textContent = 'error: ' + (p.error || '?');
+        summary.style.color = 'var(--red)';
+    } else if (running) {
+        summary.textContent = pct + '%';
+        summary.style.color = 'var(--muted)';
+    } else {
+        summary.textContent = '';
+    }
+
+    btn.disabled = running;
+    btn.textContent = running ? '⏳ Running…' : '▶ Run';
+}
+
+function startSetDates() {
+    if (_setDatesEs) { _setDatesEs.close(); _setDatesEs = null; }
+    fetch('/imdb/set-dates-bg', { method: 'POST', headers: { 'X-Delete-Token': DELETE_TOKEN } })
+        .then(r => r.json())
+        .then(j => { if (!j.error) listenSetDates(); });
+}
+
+function listenSetDates() {
+    if (_setDatesEs) _setDatesEs.close();
+    _setDatesEs = new EventSource(BASE_PATH + '/imdb/set-dates-progress');
+    _setDatesEs.onmessage = e => {
+        const p = JSON.parse(e.data);
+        _applySetDatesProgress(p);
+        if (p.phase === 'done' || p.phase === 'error') {
+            _setDatesEs.close(); _setDatesEs = null;
+        }
+    };
+}
+
+loadSetDatesStatus();
 
 connectSSE();
 </script>

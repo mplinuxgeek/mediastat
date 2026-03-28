@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Databases — MediaStat</title>
+    <style>
+        :root {
+            --bg:           #0d1117;
+            --surface:      #161b22;
+            --surface2:     #1c2128;
+            --border:       #30363d;
+            --text:         #e6edf3;
+            --muted:        #7d8590;
+            --accent:       #58a6ff;
+            --green:        #3fb950;
+            --yellow:       #d29922;
+            --red:          #f47474;
+            --imdb-gold:    #f5c518;
+            --imdb-gold-dk: #8a6a00;
+            --r:            6px;
+
+            --fs-xs:   14px;
+            --fs-sm:   15px;
+            --fs-base: 16px;
+            --fs-md:   17px;
+            --fs-lg:   19px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg); color: var(--text);
+            font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: var(--fs-base); line-height: 1.5; min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            position: sticky; top: 0; z-index: 10;
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 10px 20px; display: flex; align-items: center; gap: 16px;
+        }
+        .back-link { color: var(--muted); text-decoration: none; font-size: var(--fs-sm); transition: color 0.1s; }
+        .back-link:hover { color: var(--accent); }
+        .page-title { color: var(--text); font-size: var(--fs-md); font-weight: 600; }
+
+        /* ── Main layout ── */
+        main { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+
+        /* ── Section heading ── */
+        .section-heading {
+            font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.06em;
+            text-transform: uppercase; color: var(--muted);
+            margin: 0 0 14px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+        }
+
+        /* ── Database cards grid ── */
+        .db-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .db-card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--r); padding: 18px;
+            display: flex; flex-direction: column; gap: 0;
+        }
+        .db-card-header {
+            display: flex; align-items: baseline; gap: 8px;
+            margin-bottom: 14px;
+        }
+        .db-card-title { font-weight: 600; font-size: var(--fs-base); }
+        .db-card-source {
+            font-size: var(--fs-xs); color: var(--muted);
+            border: 1px solid var(--border); border-radius: 3px;
+            padding: 1px 6px;
+        }
+        .db-stat { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
+        .db-stat-label { color: var(--muted); font-size: var(--fs-sm); }
+        .db-stat-value { font-size: var(--fs-sm); color: var(--text); }
+        .db-stat-value.big { font-size: var(--fs-base); font-weight: 600; color: var(--accent); }
+        .db-stat-value.muted { color: var(--muted); }
+        .db-divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+        /* ── Progress bars ── */
+        .db-progress { margin: 10px 0 4px; display: none; }
+        .db-progress.visible { display: block; }
+        .progress-msg { font-size: var(--fs-xs); color: var(--muted); margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .progress-row { display: flex; align-items: center; gap: 8px; }
+        .progress-bar { height: 4px; border-radius: 2px; background: var(--border); flex: 1; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; width: 0%; }
+        .progress-fill.gold { background: var(--imdb-gold); }
+        .progress-pct { font-size: var(--fs-xs); color: var(--muted); width: 36px; text-align: right; flex-shrink: 0; }
+
+        /* ── Card actions ── */
+        .db-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+        .btn {
+            background: transparent; border: 1px solid var(--border); border-radius: var(--r);
+            color: var(--text); font-family: inherit; font-size: var(--fs-sm);
+            padding: 5px 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+            white-space: nowrap;
+        }
+        .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+        .btn:disabled { opacity: 0.45; cursor: default; }
+
+        /* ── System info ── */
+        .si-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .si-grid .si-card-full { grid-column: 1 / -1; }
+        .si-card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--r); padding: 18px;
+        }
+        .si-section-title {
+            font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.08em;
+            text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+        }
+        .si-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+        .si-label { color: var(--muted); font-size: var(--fs-sm); min-width: 220px; flex-shrink: 0; }
+        .si-val { font-size: var(--fs-sm); color: var(--text); }
+        .si-ok   { color: var(--green); }
+        .si-warn { color: var(--muted); }
+        .si-err  { color: var(--red); }
+        .si-note { color: var(--muted); font-size: var(--fs-xs); margin-left: 6px; }
+        .si-loading { color: var(--muted); font-size: var(--fs-sm); }
+        .si-actions { margin-top: 16px; }
+    </style>
+</head>
+<body>
+<header>
+    <a href="{{ ingress_path }}/" class="back-link">← MediaStat</a>
+    <span class="page-title">⬡ Databases &amp; System</span>
+</header>
+<main>
+
+    <!-- ── Databases ─────────────────────────────────────────── -->
+    <div class="section-heading">Databases</div>
+    <div class="db-grid">
+
+        <!-- IMDb Titles -->
+        <div class="db-card">
+            <div class="db-card-header">
+                <span class="db-card-title">IMDb Titles</span>
+                <span class="db-card-source">imdb.db</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Titles indexed</span>
+                <span class="db-stat-value big" id="imdb-count">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Last updated</span>
+                <span class="db-stat-value" id="imdb-updated">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Database size</span>
+                <span class="db-stat-value" id="imdb-size">—</span>
+            </div>
+            <hr class="db-divider">
+            <div class="db-progress" id="imdb-dl-progress">
+                <div class="progress-msg" id="imdb-dl-msg">Starting…</div>
+                <div class="progress-row">
+                    <div class="progress-bar"><div class="progress-fill gold" id="imdb-dl-fill"></div></div>
+                    <span class="progress-pct" id="imdb-dl-pct"></span>
+                </div>
+            </div>
+            <div class="db-actions">
+                <button class="btn" id="imdb-dl-btn" onclick="startImdbDownload()">↓ Update DB</button>
+            </div>
+        </div>
+
+        <!-- TMDB Cache (hidden until status loaded) -->
+        <div class="db-card" id="tmdb-cache-card" style="display:none">
+            <div class="db-card-header">
+                <span class="db-card-title">TMDB Release Date Cache</span>
+                <span class="db-card-source">tmdb.db</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Cached entries</span>
+                <span class="db-stat-value big" id="tmdb-count">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Last built</span>
+                <span class="db-stat-value" id="tmdb-last-built">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Database size</span>
+                <span class="db-stat-value" id="tmdb-db-size">—</span>
+            </div>
+            <hr class="db-divider">
+            <div class="db-progress" id="tmdb-cache-progress">
+                <div class="progress-msg" id="tmdb-cache-msg">Starting…</div>
+                <div class="progress-row">
+                    <div class="progress-bar"><div class="progress-fill" id="tmdb-cache-fill"></div></div>
+                    <span class="progress-pct" id="tmdb-cache-pct"></span>
+                </div>
+            </div>
+            <div class="db-actions">
+                <button class="btn" id="tmdb-cache-btn" onclick="startTmdbCacheBuild(false)">↓ Build cache</button>
+                <button class="btn" id="tmdb-cache-refresh-btn" onclick="startTmdbCacheBuild(true)">⟳ Refresh all</button>
+            </div>
+        </div>
+
+        <!-- App Database -->
+        <div class="db-card">
+            <div class="db-card-header">
+                <span class="db-card-title">App Database</span>
+                <span class="db-card-source">mediastat.db</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Scanned files</span>
+                <span class="db-stat-value big" id="app-file-count">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">IMDb matched</span>
+                <span class="db-stat-value" id="app-imdb-count">—</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-label">Database size</span>
+                <span class="db-stat-value" id="app-db-size">—</span>
+            </div>
+            <hr class="db-divider">
+            <div class="db-progress" id="dbclean-progress">
+                <div class="progress-msg" id="dbclean-msg"></div>
+                <div class="progress-row">
+                    <div class="progress-bar"><div class="progress-fill" id="dbclean-fill"></div></div>
+                    <span class="progress-pct" id="dbclean-pct"></span>
+                </div>
+            </div>
+            <div class="db-actions">
+                <button class="btn" id="dbclean-btn" onclick="startDbClean()">⌫ Clean orphans</button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ── System Info ────────────────────────────────────────── -->
+    <div class="section-heading">System Info</div>
+    <div id="sysinfo-body">
+        <span class="si-loading">Loading…</span>
+    </div>
+    <div class="si-actions">
+        <button class="btn" id="export-btn" onclick="exportSysInfoJson()" style="display:none">↓ Export JSON</button>
+    </div>
+
+</main>
+<script>
+const BASE_PATH = "{{ ingress_path }}";
+
+if (BASE_PATH) {
+    const _fetch = window.fetch;
+    window.fetch = (url, opts) => {
+        if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
+        return _fetch(url, opts);
+    };
+    const _ES = window.EventSource;
+    window.EventSource = function(url, cfg) {
+        if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
+        return new _ES(url, cfg);
+    };
+}
+
+function fmtBytes(b) {
+    if (b == null) return '—';
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+    if (b >= 1048576)    return (b / 1048576).toFixed(1) + ' MB';
+    if (b >= 1024)       return (b / 1024).toFixed(0) + ' KB';
+    return b + ' B';
+}
+
+// ── Load all database stats ────────────────────────────────────
+async function loadDatabaseStats() {
+    // IMDb status
+    try {
+        const s = await fetch('/imdb/status').then(r => r.json());
+        document.getElementById('imdb-count').textContent   = s.downloaded ? s.count.toLocaleString() : 'Not downloaded';
+        document.getElementById('imdb-updated').textContent = s.updated_at || '—';
+        document.getElementById('imdb-dl-btn').disabled     = s.in_progress;
+        if (s.in_progress) {
+            document.getElementById('imdb-dl-progress').classList.add('visible');
+            listenImdbDownload();
+        }
+    } catch (_) {
+        document.getElementById('imdb-count').textContent = 'Error loading';
+    }
+
+    // IMDb + app DB sizes
+    try {
+        const s = await fetch('/db/stats').then(r => r.json());
+        document.getElementById('imdb-size').textContent      = fmtBytes(s.imdb_db_size);
+        document.getElementById('app-file-count').textContent = s.file_count.toLocaleString();
+        document.getElementById('app-imdb-count').textContent = s.imdb_match_count.toLocaleString();
+        document.getElementById('app-db-size').textContent    = fmtBytes(s.app_db_size);
+        const tmdbSizeEl = document.getElementById('tmdb-db-size');
+        if (tmdbSizeEl) tmdbSizeEl.textContent = fmtBytes(s.tmdb_db_size);
+    } catch (_) {}
+
+    // TMDB status (only show card if TMDB is configured)
+    try {
+        const t = await fetch('/tmdb/status').then(r => r.json());
+        if (t.configured) {
+            document.getElementById('tmdb-cache-card').style.display = '';
+            const cs = await fetch('/tmdb/cache-status').then(r => r.json());
+            document.getElementById('tmdb-count').textContent      = cs.count.toLocaleString();
+            document.getElementById('tmdb-last-built').textContent = cs.last_fetched ? cs.last_fetched.slice(0, 16) : '—';
+            if (cs.running) {
+                document.getElementById('tmdb-cache-btn').disabled         = true;
+                document.getElementById('tmdb-cache-refresh-btn').disabled = true;
+                document.getElementById('tmdb-cache-progress').classList.add('visible');
+                listenTmdbCache();
+            }
+        }
+    } catch (_) {}
+}
+
+// ── IMDb download ─────────────────────────────────────────────
+let _imdbDlEs = null;
+async function startImdbDownload() {
+    document.getElementById('imdb-dl-btn').disabled = true;
+    document.getElementById('imdb-dl-progress').classList.add('visible');
+    await fetch('/imdb/start-download', { method: 'POST' });
+    listenImdbDownload();
+}
+function listenImdbDownload() {
+    if (_imdbDlEs) _imdbDlEs.close();
+    _imdbDlEs = new EventSource('/imdb/download-progress');
+    const msgEl  = document.getElementById('imdb-dl-msg');
+    const fillEl = document.getElementById('imdb-dl-fill');
+    const pctEl  = document.getElementById('imdb-dl-pct');
+    _imdbDlEs.onmessage = (e) => {
+        const p = JSON.parse(e.data);
+        const fileLabels = { all:'all files', titles:'titles', 'cast+ratings':'cast & ratings', names:'names' };
+        const lbl = fileLabels[p.file] || p.file || '';
+        if (p.phase === 'downloading') {
+            const pct = p.total ? Math.round(p.downloaded * 100 / p.total) : 0;
+            msgEl.textContent = `Downloading… ${Math.round(p.downloaded/1048576)} / ${Math.round(p.total/1048576)} MB`;
+            fillEl.style.width = Math.round(pct / 2) + '%';
+            pctEl.textContent  = pct + '%';
+        } else if (p.phase === 'counting') {
+            msgEl.textContent  = 'Counting titles…';
+            fillEl.style.width = '52%'; pctEl.textContent = '';
+        } else if (p.phase === 'parsing') {
+            if (p.file === 'titles' && p.total_titles) {
+                const pct = Math.round(p.rows * 100 / p.total_titles);
+                msgEl.textContent = `Parsing titles… ${(p.rows||0).toLocaleString()} / ${p.total_titles.toLocaleString()}`;
+                fillEl.style.width = (55 + Math.round(pct * 0.25)) + '%';
+                pctEl.textContent  = pct + '%';
+            } else {
+                msgEl.textContent  = p.file === 'cast+ratings' ? 'Parsing cast & ratings…' : `Parsing ${lbl}…`;
+                fillEl.style.width = p.file === 'cast+ratings' ? '85%' : '90%';
+                pctEl.textContent  = '';
+            }
+        } else if (p.phase === 'indexing') {
+            msgEl.textContent  = 'Building search index…';
+            fillEl.style.width = '95%';
+        } else if (p.phase === 'done') {
+            fillEl.style.width = '100%'; pctEl.textContent = '100%';
+            msgEl.textContent  = `Done — ${p.rows.toLocaleString()} titles imported`;
+            _imdbDlEs.close(); _imdbDlEs = null;
+            setTimeout(() => {
+                document.getElementById('imdb-dl-progress').classList.remove('visible');
+                loadDatabaseStats();
+            }, 3000);
+        } else if (p.phase === 'error') {
+            msgEl.textContent       = 'Error: ' + p.error;
+            fillEl.style.background = 'var(--red)';
+            document.getElementById('imdb-dl-btn').disabled = false;
+            _imdbDlEs.close(); _imdbDlEs = null;
+        }
+    };
+}
+
+// ── TMDB cache ────────────────────────────────────────────────
+let _tmdbCacheEs = null;
+async function startTmdbCacheBuild(force) {
+    document.getElementById('tmdb-cache-btn').disabled         = true;
+    document.getElementById('tmdb-cache-refresh-btn').disabled = true;
+    document.getElementById('tmdb-cache-progress').classList.add('visible');
+    const r = await fetch('/tmdb/build-cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: !!force }),
+    }).then(r => r.json());
+    if (r.error) {
+        document.getElementById('tmdb-cache-msg').textContent = 'Error: ' + r.error;
+        document.getElementById('tmdb-cache-btn').disabled         = false;
+        document.getElementById('tmdb-cache-refresh-btn').disabled = false;
+        return;
+    }
+    listenTmdbCache();
+}
+function listenTmdbCache() {
+    if (_tmdbCacheEs) _tmdbCacheEs.close();
+    _tmdbCacheEs = new EventSource('/tmdb/cache-progress');
+    const msgEl  = document.getElementById('tmdb-cache-msg');
+    const fillEl = document.getElementById('tmdb-cache-fill');
+    const pctEl  = document.getElementById('tmdb-cache-pct');
+    _tmdbCacheEs.onmessage = (e) => {
+        const p = JSON.parse(e.data);
+        if (p.phase === 'fetching') {
+            const pct   = p.total ? Math.round(p.done * 100 / p.total) : 0;
+            const skips = p.done - (p.found||0) - (p.not_found||0) - (p.errors||0);
+            msgEl.textContent = `Fetching… ${p.done.toLocaleString()} / ${p.total.toLocaleString()}` +
+                (skips > 0 ? ` (${skips.toLocaleString()} cached)` : '');
+            fillEl.style.width = pct + '%';
+            pctEl.textContent  = pct + '%';
+        } else if (p.phase === 'done') {
+            fillEl.style.width = '100%'; pctEl.textContent = '100%';
+            msgEl.textContent  = `Done — ${(p.found||0).toLocaleString()} fetched` +
+                (p.not_found ? `, ${p.not_found} not found` : '') +
+                (p.errors    ? `, ${p.errors} errors` : '');
+            _tmdbCacheEs.close(); _tmdbCacheEs = null;
+            setTimeout(() => {
+                document.getElementById('tmdb-cache-progress').classList.remove('visible');
+                loadDatabaseStats();
+            }, 3000);
+        } else if (p.phase === 'error') {
+            msgEl.textContent       = 'Error: ' + p.error;
+            fillEl.style.background = 'var(--red)';
+            document.getElementById('tmdb-cache-btn').disabled         = false;
+            document.getElementById('tmdb-cache-refresh-btn').disabled = false;
+            _tmdbCacheEs.close(); _tmdbCacheEs = null;
+        }
+    };
+}
+
+// ── System info ───────────────────────────────────────────────
+let _sysInfoData = null;
+
+async function loadSysInfo() {
+    const body = document.getElementById('sysinfo-body');
+    try {
+        const resp = await fetch('/encode/info');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        _sysInfoData = await resp.json();
+        body.innerHTML = renderSysinfo(_sysInfoData);
+        document.getElementById('export-btn').style.display = '';
+    } catch (e) {
+        body.innerHTML = `<span class="si-loading si-err">Failed to load: ${e.message}</span>`;
+    }
+}
+
+function exportSysInfoJson() {
+    if (!_sysInfoData) return;
+    const blob = new Blob([JSON.stringify(_sysInfoData, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mediastat-sysinfo.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderSysinfo(d) {
+    const ok   = (t, note) => `<span class="si-ok">✓ ${t}</span>${note ? `<span class="si-note">${esc(note)}</span>` : ''}`;
+    const warn = (t, note) => `<span class="si-warn">✗ ${t}</span>${note ? `<span class="si-note">${esc(note)}</span>` : ''}`;
+    const row  = (label, content) => `<div class="si-row"><span class="si-label">${label}</span><span class="si-val">${content}</span></div>`;
+
+    const sys = d.system || {};
+    const hw  = d.hw     || {};
+    const ffe = d.ff_encoders || {};
+    const drv = d.drivers || {};
+    const ffVer = d.versions?.ffmpeg;
+    const fpVer = d.versions?.ffprobe;
+
+    const mkCard = (title, rows, full = false) =>
+        `<div class="si-card${full ? ' si-card-full' : ''}"><div class="si-section-title">${title}</div>${rows}</div>`;
+
+    const mkVer = d.versions?.mkvmerge;
+    const muVer = d.versions?.mutagen;
+
+    const sysCard = mkCard('System', [
+        row('CPU', sys.cpu_model ? esc(sys.cpu_model) + (sys.cpu_cores ? `<span class="si-note">${sys.cpu_cores} physical cores</span>` : '') : warn('Unknown')),
+        row('RAM', sys.ram_total_gb != null ? ok(`${sys.ram_total_gb} GB`) : warn('Unknown')),
+    ].join(''), true);
+
+    const compCard = mkCard('Components', [
+        row('ffmpeg',          ffVer  ? ok(esc(ffVer))  : warn('Not found')),
+        row('ffprobe',         fpVer  ? ok(esc(fpVer))  : warn('Not found')),
+        row('mkvtoolnix',      mkVer  ? ok(esc(mkVer))  : warn('Not found')),
+        row('python3-mutagen', muVer  ? ok(esc(muVer))  : warn('Not found')),
+    ].join(''));
+
+    const hwCard = mkCard('Hardware Detected', [
+        row('Intel QSV / VAAPI', hw.vaapi ? ok('Present') : warn('Not detected')),
+        row('NVIDIA NVENC',      hw.nvenc ? ok('Present') : warn('Not detected')),
+        row('AMD VAAPI',         hw.amd   ? ok('Present') : warn('Not detected')),
+    ].join(''));
+
+    const driList = (drv.dri_devices || []).map(d => d.replace('/dev/dri/','')).join(', ') || 'none';
+    const drvCard = mkCard('Media Drivers', [
+        row('/dev/dri devices',     driList !== 'none' ? ok(esc(driList)) : warn('none', 'no DRM render nodes — GPU passthrough not enabled')),
+        row('VA-API driver',        drv.vaapi_driver ? ok(esc(drv.vaapi_driver), drv.vaapi_profiles ? `${drv.vaapi_profiles} profiles` : '') : warn('not loaded', 'check VA-API driver install')),
+        row('Intel iHD driver',     drv.intel_iHD  ? ok('iHD_drv_video.so') : warn('not found', 'install intel-media-va-driver-non-free')),
+        row('Intel i965 driver',    drv.intel_i965 ? ok('i965_drv_video.so') : warn('not found', 'optional — older Intel GPUs only')),
+        row('Mesa VA driver',       drv.mesa_va    ? ok('present') : warn('not found', 'optional — AMD / software')),
+        row('Intel oneVPL (libvpl)',drv.libvpl     ? ok('libvpl.so') : warn('not found', 'install libvpl2 for QSV')),
+    ].join(''), true);
+
+    const ffEncRow = (label, hwKey, ffKey) => {
+        const hwOk = hw[hwKey], ffOk = ffe[ffKey];
+        if (ffOk && hwOk)  return row(label, ok('Ready', 'compiled in · hardware present'));
+        if (ffOk && !hwOk) return row(label, `<span class="si-ok">✓ Compiled in</span><span class="si-note">hardware not detected</span>`);
+        if (!ffOk && hwOk) return row(label, warn('Not compiled in', 'hardware present but this ffmpeg build lacks support'));
+        return row(label, warn('Not available'));
+    };
+    const encCard = mkCard('ffmpeg Encoder Support', [
+        ffEncRow('hevc_vaapi (Intel/AMD)', 'vaapi', 'vaapi'),
+        ffEncRow('hevc_nvenc (NVIDIA)',    'nvenc', 'nvenc'),
+        row('libx265 (software)',          ffe.libx265 ? ok('Available') : warn('Not compiled in')),
+    ].join(''), true);
+
+    return `<div class="si-grid">${sysCard}${compCard}${hwCard}${drvCard}${encCard}</div>`;
+}
+
+// ── DB Clean ──────────────────────────────────────────────────
+let _dbCleanEs = null;
+
+function _applyDbCleanProgress(p) {
+    const progDiv = document.getElementById('dbclean-progress');
+    const fill    = document.getElementById('dbclean-fill');
+    const pctEl   = document.getElementById('dbclean-pct');
+    const msgEl   = document.getElementById('dbclean-msg');
+    const btn     = document.getElementById('dbclean-btn');
+    const running = p.phase === 'running';
+
+    progDiv.classList.toggle('visible', p.phase !== 'idle');
+    const pct = p.total > 0 ? Math.round((p.checked / p.total) * 100) : 0;
+    fill.style.width = pct + '%';
+    pctEl.textContent = p.phase === 'running' ? pct + '%' : '';
+
+    if (p.phase === 'done') {
+        fill.style.background = 'var(--green)';
+        msgEl.textContent = `Removed ${p.meta_removed} file_meta, ${p.imdb_removed} file_imdb, ${p.tmdb_removed} tmdb_cache entries`;
+        loadDatabaseStats();
+    } else if (p.phase === 'error') {
+        fill.style.background = 'var(--red)';
+        msgEl.textContent = 'Error: ' + (p.error || '?');
+    } else if (running) {
+        fill.style.background = '';
+        msgEl.textContent = `Checking ${p.checked} / ${p.total}…`;
+    }
+
+    btn.disabled = running;
+    btn.textContent = running ? '⏳ Checking…' : '⌫ Clean orphans';
+}
+
+async function startDbClean() {
+    if (_dbCleanEs) { _dbCleanEs.close(); _dbCleanEs = null; }
+    const r = await fetch('/db/clean', { method: 'POST' });
+    const j = await r.json();
+    if (j.error) { alert(j.error); return; }
+    _dbCleanEs = new EventSource(BASE_PATH + '/db/clean-progress');
+    _dbCleanEs.onmessage = e => {
+        const p = JSON.parse(e.data);
+        _applyDbCleanProgress(p);
+        if (p.phase === 'done' || p.phase === 'error') {
+            _dbCleanEs.close(); _dbCleanEs = null;
+        }
+    };
+}
+
+(async () => {
+    try {
+        const r = await fetch('/db/clean-status');
+        if (r.ok) _applyDbCleanProgress(await r.json());
+    } catch (_) {}
+})();
+
+// ── Boot ──────────────────────────────────────────────────────
+loadDatabaseStats();
+loadSysInfo();
+</script>
+</body>
+</html>

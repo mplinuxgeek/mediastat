@@ -7,10 +7,14 @@ import asyncio
 import math
 import secrets
 import subprocess
+import tempfile
 import time
 import platform
+import datetime
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import quote
+import urllib.request
+from urllib.parse import quote, urlencode
 from typing import Optional
 
 import yaml
@@ -30,6 +34,7 @@ _uvc_config.LOGGING_CONFIG.setdefault("loggers", {})[""] = {
 }
 
 from fastapi import FastAPI, Form, Request, Query, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 import aiosqlite
@@ -52,6 +57,9 @@ def _load_config() -> dict:
 
 
 _config = _load_config()
+
+# Optional TMDB API key — set tmdb_api_key in config.yaml to enable TMDB search
+TMDB_API_KEY: str = (_config.get("tmdb_api_key") or "").strip()
 
 # Directories listed in config.yaml: [{label, path}, ...]
 CONFIGURED_DIRS: list[dict] = [
@@ -117,6 +125,8 @@ async def lifespan(app: FastAPI):
     global current_root, _real_root, _hw_accel_info
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     await init_db()
+    await _init_imdb()
+    await _init_tmdb()
     current_root = await load_root()
     _real_root = Path(os.path.realpath(current_root))
     # Load persisted schedule config
@@ -149,6 +159,7 @@ async def lifespan(app: FastAPI):
         pass
 
 app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.filters["pathquote"] = lambda p: quote(str(p), safe="")
 
@@ -160,6 +171,1120 @@ async def log_requests(request: Request, call_next):
     # Capture HA ingress base path so templates and redirects can use it
     request.state.ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
     return await call_next(request)
+
+
+# ── IMDB ─────────────────────────────────────────────────────────────────────
+IMDB_DB_PATH = str(Path(DB_PATH).parent / "imdb.db")
+TMDB_DB_PATH = str(Path(DB_PATH).parent / "tmdb.db")
+IMDB_DATA_URL       = "https://datasets.imdbws.com/title.basics.tsv.gz"
+IMDB_PRINCIPALS_URL = "https://datasets.imdbws.com/title.principals.tsv.gz"
+IMDB_NAMES_URL      = "https://datasets.imdbws.com/name.basics.tsv.gz"
+IMDB_RATINGS_URL    = "https://datasets.imdbws.com/title.ratings.tsv.gz"
+_imdb_progress: dict = {}
+_setdates_progress: dict = {"phase": "idle", "done": 0, "total": 0, "skipped": 0, "updated": 0, "errors": 0}
+
+
+def _norm_title(s: str) -> str:
+    """Normalise a title for matching: lowercase, remove apostrophes and slashes
+    (Freddy's→Freddys, Self/less→Selfless), replace other punctuation with space."""
+    s = s.lower().replace("&", " and ")
+    s = re.sub(r"['/\u2019]", "", s)   # remove apostrophes and forward-slashes
+    return re.sub(r"\s+", " ", re.sub(r"[:\",.?!\-\u2013\u2014]", " ", s)).strip()
+
+
+async def _init_imdb():
+    """Create IMDB schema (imdb.db + file_imdb table in main DB)."""
+    async with aiosqlite.connect(IMDB_DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS imdb_titles (
+                tconst              TEXT PRIMARY KEY,
+                primary_title       TEXT,
+                original_title      TEXT,
+                start_year          INTEGER,
+                runtime_minutes     INTEGER,
+                genres              TEXT,
+                norm_title          TEXT,
+                norm_original_title TEXT,
+                title_type          TEXT
+            )
+        """)
+        # Migrations for existing DBs
+        for col in ("norm_title TEXT", "norm_original_title TEXT", "title_type TEXT"):
+            try:
+                await db.execute(f"ALTER TABLE imdb_titles ADD COLUMN {col}")
+                await db.commit()
+            except Exception:
+                pass  # column already exists
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_imdb_norm
+            ON imdb_titles(norm_title, start_year)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_imdb_norm_orig
+            ON imdb_titles(norm_original_title, start_year)
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS imdb_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS imdb_cast (
+                tconst      TEXT PRIMARY KEY,
+                cast_names  TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS imdb_ratings (
+                tconst         TEXT PRIMARY KEY,
+                average_rating REAL,
+                num_votes      INTEGER
+            )
+        """)
+        # FTS5 index for fast text search (content= links to imdb_titles)
+        await db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS imdb_fts
+            USING fts5(primary_title, content=imdb_titles, content_rowid=rowid)
+        """)
+        await db.commit()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS file_imdb (
+                path            TEXT PRIMARY KEY,
+                tconst          TEXT NOT NULL,
+                primary_title   TEXT,
+                start_year      INTEGER,
+                genres          TEXT,
+                runtime_minutes INTEGER,
+                matched_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+                source          TEXT DEFAULT 'imdb',
+                release_date    TEXT
+            )
+        """)
+        # Migrations for existing DBs
+        for col, defn in [("source", "TEXT DEFAULT 'imdb'"), ("release_date", "TEXT"), ("rating", "REAL")]:
+            try:
+                await db.execute(f"ALTER TABLE file_imdb ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # column already exists
+        await db.commit()
+
+
+async def _init_tmdb():
+    """Create / migrate TMDB cache schema in tmdb.db."""
+    async with aiosqlite.connect(TMDB_DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tmdb_cache (
+                tconst           TEXT PRIMARY KEY,
+                tmdb_id          INTEGER,
+                media_type       TEXT,
+                title            TEXT,
+                original_title   TEXT,
+                release_date     TEXT,
+                overview         TEXT,
+                vote_average     REAL,
+                vote_count       INTEGER,
+                popularity       REAL,
+                poster_path      TEXT,
+                backdrop_path    TEXT,
+                genre_ids        TEXT,
+                original_language TEXT,
+                fetched_at       TEXT
+            )
+        """)
+        # Migrations for databases created before the schema was extended
+        for col, defn in [
+            ("original_title",    "TEXT"),
+            ("overview",          "TEXT"),
+            ("vote_average",      "REAL"),
+            ("vote_count",        "INTEGER"),
+            ("popularity",        "REAL"),
+            ("poster_path",       "TEXT"),
+            ("backdrop_path",     "TEXT"),
+            ("genre_ids",         "TEXT"),
+            ("original_language", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE tmdb_cache ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # column already exists
+        await db.commit()
+
+
+def _parse_media_filename(filename: str) -> tuple[str, int | None]:
+    """Extract (title, year) from filenames like 'The Terminator (1984).mkv'."""
+    stem = Path(filename).stem
+    # "Title (Year)" or "Title (Year) [extras]"
+    m = re.match(r'^(.+?)\s*\((\d{4})\)', stem)
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    # "Title.Year.rest" Plex-style
+    m = re.match(r'^(.+?)\.((?:19|20)\d{2})(?:\.|$)', stem)
+    if m:
+        return m.group(1).replace('.', ' ').strip(), int(m.group(2))
+    # Year anywhere in name
+    m = re.search(r'\b((?:19|20)\d{2})\b', stem)
+    if m:
+        return stem[:m.start()].strip(' -_.'), int(m.group(1))
+    return stem, None
+
+
+def _dl_gz_tracked(url: str, key: str, dl_bytes: dict, dl_total: dict) -> bytes:
+    """Download a .gz file, writing per-key byte counts into shared dicts."""
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=300) as resp:
+        dl_total[key] = int(resp.headers.get("Content-Length", 0))
+        chunks: list[bytes] = []
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            dl_bytes[key] += len(chunk)
+    return b"".join(chunks)
+
+
+def _imdb_import_thread():
+    """Download and import IMDB titles, cast, name, and ratings data. Runs in a thread."""
+    global _imdb_progress
+    import gzip, io, sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        # ── Phase 1: download all four files in parallel ───────────
+        dl_bytes: dict[str, int] = {"titles": 0, "cast": 0, "names": 0, "ratings": 0}
+        dl_total: dict[str, int] = {"titles": 0, "cast": 0, "names": 0, "ratings": 0}
+        raw: dict[str, bytes] = {}
+        _imdb_progress = {"phase": "downloading", "file": "all", "downloaded": 0, "total": 0, "rows": 0, "done": False}
+
+        def _dl_one(key: str, url: str) -> None:
+            raw[key] = _dl_gz_tracked(url, key, dl_bytes, dl_total)
+            _imdb_progress["downloaded"] = sum(dl_bytes.values())
+            _imdb_progress["total"] = sum(dl_total.values())
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = [
+                pool.submit(_dl_one, "titles",  IMDB_DATA_URL),
+                pool.submit(_dl_one, "cast",    IMDB_PRINCIPALS_URL),
+                pool.submit(_dl_one, "names",   IMDB_NAMES_URL),
+                pool.submit(_dl_one, "ratings", IMDB_RATINGS_URL),
+            ]
+            for fut in futs:
+                fut.result()  # re-raise any download exception
+
+        # ── Phase 2a: count matching titles for accurate progress ──────
+        _TITLE_TYPES = {b"movie", b"tvMovie", b"tvMiniSeries", b"tvSpecial", b"video", b"short"}
+        _imdb_progress = {"phase": "counting", "rows": 0, "total_titles": 0, "done": False}
+        total_titles = 0
+        with gzip.open(io.BytesIO(raw["titles"])) as f:
+            next(f)  # skip header
+            for line in f:
+                p2 = line.split(b"\t", 2)
+                if len(p2) >= 2 and p2[1] in _TITLE_TYPES:
+                    total_titles += 1
+
+        # ── Phase 2b: parse titles, write to DB, build imported_tconsts ─
+        _imdb_progress = {"phase": "parsing", "file": "titles", "rows": 0, "total_titles": total_titles, "done": False}
+        conn = sqlite3.connect(IMDB_DB_PATH, timeout=60)
+        try:
+            conn.execute("DELETE FROM imdb_titles")
+            conn.execute("DELETE FROM imdb_cast")
+            conn.execute("DELETE FROM imdb_ratings")
+            conn.commit()
+
+            imported_tconsts: set[str] = set()
+            rows = 0
+            batch: list[tuple] = []
+            with gzip.open(io.BytesIO(raw["titles"])) as f:
+                next(f)  # skip header
+                for line in f:
+                    parts = line.decode("utf-8", errors="replace").rstrip("\r\n").split("\t")
+                    if len(parts) < 9:
+                        continue
+                    tconst, ttype, ptitle, otitle, _, syear, _, rmin, genres = parts[:9]
+                    if ttype not in ("movie", "tvMovie", "tvMiniSeries", "tvSpecial", "video", "short"):
+                        continue
+                    norm_o = _norm_title(otitle) if otitle and otitle != r"\N" else None
+                    batch.append((
+                        tconst, ptitle, otitle if otitle != r"\N" else None,
+                        int(syear) if syear != r"\N" else None,
+                        int(rmin) if rmin != r"\N" else None,
+                        None if genres == r"\N" else genres,
+                        _norm_title(ptitle),
+                        norm_o if norm_o != _norm_title(ptitle) else None,
+                        ttype,
+                    ))
+                    imported_tconsts.add(tconst)
+                    rows += 1
+                    if len(batch) >= 5000:
+                        conn.executemany("INSERT OR REPLACE INTO imdb_titles VALUES (?,?,?,?,?,?,?,?,?)", batch)
+                        conn.commit()
+                        batch = []
+                        _imdb_progress["rows"] = rows
+            if batch:
+                conn.executemany("INSERT OR REPLACE INTO imdb_titles VALUES (?,?,?,?,?,?,?,?,?)", batch)
+                conn.commit()
+            _imdb_progress["rows"] = rows
+        finally:
+            conn.close()
+        del raw["titles"]
+
+        # ── Phase 3: parse principals + ratings in parallel ────────
+        # Both only need `imported_tconsts` (read-only), so safe to run together.
+        _imdb_progress = {"phase": "parsing", "file": "cast+ratings", "rows": rows, "done": False}
+        cast_map: dict[str, list[tuple[int, str]]] = {}
+        rating_rows: list[tuple] = []
+
+        def _parse_cast() -> None:
+            with gzip.open(io.BytesIO(raw["cast"])) as f:
+                next(f)
+                for line in f:
+                    parts = line.decode("utf-8", errors="replace").rstrip("\r\n").split("\t")
+                    if len(parts) < 4:
+                        continue
+                    tconst, ordering, nconst, category = parts[0], parts[1], parts[2], parts[3]
+                    if tconst not in imported_tconsts or category not in ("actor", "actress"):
+                        continue
+                    try:
+                        ord_int = int(ordering)
+                    except ValueError:
+                        continue
+                    if ord_int <= 5:
+                        cast_map.setdefault(tconst, []).append((ord_int, nconst))
+
+        def _parse_ratings() -> None:
+            with gzip.open(io.BytesIO(raw["ratings"])) as f:
+                next(f)
+                for line in f:
+                    parts = line.decode("utf-8", errors="replace").rstrip("\r\n").split("\t")
+                    if len(parts) < 3:
+                        continue
+                    tconst, avg, votes = parts[0], parts[1], parts[2]
+                    if tconst not in imported_tconsts:
+                        continue
+                    try:
+                        rating_rows.append((tconst, float(avg), int(votes)))
+                    except ValueError:
+                        continue
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_parse_cast)
+            f2 = pool.submit(_parse_ratings)
+            f1.result()
+            f2.result()
+        del raw["cast"], raw["ratings"]
+
+        # ── Phase 4: parse names (needs needed_nconsts from cast_map) ──
+        _imdb_progress = {"phase": "parsing", "file": "names", "rows": rows, "done": False}
+        needed_nconsts: set[str] = {nc for entries in cast_map.values() for _, nc in entries}
+        name_map: dict[str, str] = {}
+        with gzip.open(io.BytesIO(raw["names"])) as f:
+            next(f)
+            for line in f:
+                parts = line.decode("utf-8", errors="replace").rstrip("\r\n").split("\t")
+                if len(parts) < 2:
+                    continue
+                nconst, pname = parts[0], parts[1]
+                if nconst in needed_nconsts:
+                    name_map[nconst] = pname
+        del raw["names"]
+
+        # ── Phase 5: write cast + ratings to DB, rebuild FTS ──────
+        _imdb_progress = {"phase": "indexing", "rows": rows, "done": False}
+        conn = sqlite3.connect(IMDB_DB_PATH, timeout=60)
+        try:
+            cast_batch: list[tuple] = []
+            for tconst, entries in cast_map.items():
+                entries.sort(key=lambda x: x[0])
+                names = [name_map[nc] for _, nc in entries if nc in name_map]
+                if names:
+                    cast_batch.append((tconst, ", ".join(names)))
+                if len(cast_batch) >= 5000:
+                    conn.executemany("INSERT OR REPLACE INTO imdb_cast VALUES (?,?)", cast_batch)
+                    conn.commit()
+                    cast_batch = []
+            if cast_batch:
+                conn.executemany("INSERT OR REPLACE INTO imdb_cast VALUES (?,?)", cast_batch)
+                conn.commit()
+
+            for i in range(0, len(rating_rows), 5000):
+                conn.executemany("INSERT OR REPLACE INTO imdb_ratings VALUES (?,?,?)", rating_rows[i:i + 5000])
+                conn.commit()
+
+            conn.execute("INSERT INTO imdb_fts(imdb_fts) VALUES('rebuild')")
+            conn.execute("INSERT OR REPLACE INTO imdb_meta VALUES ('updated_at', datetime('now'))")
+            conn.execute(f"INSERT OR REPLACE INTO imdb_meta VALUES ('count', '{rows}')")
+            conn.commit()
+        finally:
+            conn.close()
+
+        _imdb_progress = {"phase": "done", "rows": rows, "done": True}
+    except Exception as exc:
+        _imdb_progress = {"phase": "error", "error": str(exc), "done": True}
+
+
+@app.post("/imdb/start-download")
+async def imdb_start_download():
+    if _imdb_progress.get("phase") in ("downloading", "parsing", "indexing"):
+        return {"error": "Import already in progress"}
+    import threading
+    threading.Thread(target=_imdb_import_thread, daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/imdb/download-progress")
+async def imdb_download_progress():
+    async def _gen():
+        while True:
+            p = dict(_imdb_progress)
+            yield f"data: {json.dumps(p)}\n\n"
+            if p.get("done"):
+                break
+            await asyncio.sleep(0.5)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+_TMDB_INSERT = (
+    "INSERT OR REPLACE INTO tmdb_cache "
+    "(tconst, tmdb_id, media_type, title, original_title, release_date, "
+    " overview, vote_average, vote_count, popularity, "
+    " poster_path, backdrop_path, genre_ids, original_language, fetched_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))"
+)
+
+
+def _tmdb_row_from_api(tconst: str, item: dict, media_type: str) -> tuple:
+    """Extract a full tmdb_cache row tuple from a TMDB API result item."""
+    if media_type == "movie":
+        title    = item.get("title") or item.get("original_title")
+        orig     = item.get("original_title")
+        rel_date = item.get("release_date") or None
+    else:
+        title    = item.get("name") or item.get("original_name")
+        orig     = item.get("original_name")
+        rel_date = item.get("first_air_date") or None
+    genre_ids = json.dumps(item.get("genre_ids") or [])
+    return (
+        tconst,
+        item.get("id"),
+        media_type,
+        title,
+        orig if orig != title else None,
+        rel_date,
+        item.get("overview") or None,
+        item.get("vote_average"),
+        item.get("vote_count"),
+        item.get("popularity"),
+        item.get("poster_path"),
+        item.get("backdrop_path"),
+        genre_ids,
+        item.get("original_language"),
+    )
+
+
+_tmdb_cache_progress: dict = {}
+
+
+def _tmdb_cache_thread(force: bool = False) -> None:
+    global _tmdb_cache_progress
+    import sqlite3, time
+
+    try:
+        with sqlite3.connect(DB_PATH, timeout=60) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT tconst FROM file_imdb WHERE tconst LIKE 'tt%'"
+            ).fetchall()
+        tconsts = [r[0] for r in rows]
+        total = len(tconsts)
+        _tmdb_cache_progress = {
+            "phase": "fetching", "done": 0, "total": total,
+            "found": 0, "not_found": 0, "errors": 0, "finished": False,
+        }
+
+        with sqlite3.connect(TMDB_DB_PATH, timeout=60) as conn:
+            done = found = not_found = errors = 0
+            for tconst in tconsts:
+                if not force:
+                    if conn.execute(
+                        "SELECT 1 FROM tmdb_cache WHERE tconst=?", (tconst,)
+                    ).fetchone():
+                        done += 1
+                        _tmdb_cache_progress.update({"done": done})
+                        continue
+
+                try:
+                    data = _tmdb_api_get(f"/find/{tconst}", {"external_source": "imdb_id"})
+                    row = None
+                    for item in (data.get("movie_results") or [])[:1]:
+                        row = _tmdb_row_from_api(tconst, item, "movie")
+                    if not row:
+                        for item in (data.get("tv_results") or [])[:1]:
+                            row = _tmdb_row_from_api(tconst, item, "tv")
+                    if row:
+                        conn.execute(_TMDB_INSERT, row)
+                        conn.commit()
+                        found += 1
+                    else:
+                        not_found += 1
+                except Exception:
+                    errors += 1
+
+                done += 1
+                _tmdb_cache_progress.update({"done": done, "found": found,
+                                             "not_found": not_found, "errors": errors})
+                time.sleep(0.1)  # ~10 req/s — within TMDB free-tier limit
+
+        _tmdb_cache_progress = {
+            "phase": "done", "done": done, "total": total,
+            "found": found, "not_found": not_found, "errors": errors, "finished": True,
+        }
+    except Exception as exc:
+        _tmdb_cache_progress = {"phase": "error", "error": str(exc), "finished": True}
+
+
+@app.get("/tmdb/status")
+async def tmdb_status():
+    return {"configured": bool(TMDB_API_KEY)}
+
+
+@app.post("/tmdb/build-cache")
+async def tmdb_build_cache(request: Request):
+    if not TMDB_API_KEY:
+        raise HTTPException(503, "TMDB not configured")
+    body = await request.json()
+    force = bool(body.get("force", False))
+    if _tmdb_cache_progress.get("phase") == "fetching":
+        return {"error": "Already running"}
+    import threading
+    threading.Thread(target=_tmdb_cache_thread, kwargs={"force": force}, daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/tmdb/cache-progress")
+async def tmdb_cache_progress_sse():
+    async def _gen():
+        while True:
+            p = dict(_tmdb_cache_progress)
+            yield f"data: {json.dumps(p)}\n\n"
+            if p.get("finished"):
+                break
+            await asyncio.sleep(0.5)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/tmdb/cache-status")
+async def tmdb_cache_status_route():
+    try:
+        async with aiosqlite.connect(TMDB_DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM tmdb_cache") as cur:
+                count = (await cur.fetchone())[0]
+            async with db.execute(
+                "SELECT MAX(fetched_at) FROM tmdb_cache"
+            ) as cur:
+                row = await cur.fetchone()
+                last_fetched = row[0] if row else None
+    except Exception:
+        count, last_fetched = 0, None
+    return {
+        "count": count,
+        "last_fetched": last_fetched,
+        "running": _tmdb_cache_progress.get("phase") == "fetching",
+    }
+
+
+def _tmdb_api_get(path: str, params: dict) -> dict:
+    """Synchronous TMDB API call — run via asyncio.to_thread."""
+    p = dict(params)
+    p["api_key"] = TMDB_API_KEY
+    url = "https://api.themoviedb.org/3" + path + "?" + urlencode(p)
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+@app.get("/tmdb/search")
+async def tmdb_search(q: str = Query(...), year: Optional[int] = Query(None)):
+    if not TMDB_API_KEY:
+        raise HTTPException(503, "TMDB API key not configured — add tmdb_api_key to config.yaml")
+    q = q.strip()
+    if not q:
+        return []
+
+    results: list[dict] = []
+    base_params: dict = {"query": q, "include_adult": "false", "language": "en-US", "page": "1"}
+
+    # Movies
+    movie_params = dict(base_params)
+    if year:
+        movie_params["year"] = str(year)
+    try:
+        data = await asyncio.to_thread(_tmdb_api_get, "/search/movie", movie_params)
+        for item in data.get("results", [])[:10]:
+            rd = item.get("release_date") or ""
+            results.append({
+                "tconst":          f"tmdb:{item['id']}",
+                "primary_title":   item.get("title", ""),
+                "original_title":  item.get("original_title", ""),
+                "release_date":    rd,
+                "start_year":      int(rd[:4]) if rd else None,
+                "runtime_minutes": None,
+                "genres":          "",
+                "cast_names":      "",
+                "source":          "tmdb",
+                "media_type":      "movie",
+            })
+    except Exception as exc:
+        log.warning("TMDB movie search failed: %s", exc)
+
+    # TV series
+    tv_params = dict(base_params)
+    if year:
+        tv_params["first_air_date_year"] = str(year)
+    try:
+        tv_data = await asyncio.to_thread(_tmdb_api_get, "/search/tv", tv_params)
+        for item in tv_data.get("results", [])[:5]:
+            rd = item.get("first_air_date") or ""
+            results.append({
+                "tconst":          f"tmdb:tv:{item['id']}",
+                "primary_title":   item.get("name", ""),
+                "original_title":  item.get("original_name", ""),
+                "release_date":    rd,
+                "start_year":      int(rd[:4]) if rd else None,
+                "runtime_minutes": None,
+                "genres":          "",
+                "cast_names":      "",
+                "source":          "tmdb",
+                "media_type":      "tv",
+            })
+    except Exception as exc:
+        log.warning("TMDB TV search failed: %s", exc)
+
+    return results
+
+
+@app.post("/tmdb/enrich")
+async def tmdb_enrich(request: Request):
+    """Fetch full release date from TMDB using the stored IMDb tconst and update file_imdb.
+    Checks local tmdb_cache first; falls back to the API on a cache miss and stores the result."""
+    if not TMDB_API_KEY:
+        raise HTTPException(503, "TMDB not configured")
+    body = await request.json()
+    path   = body.get("path", "").strip()
+    tconst = body.get("tconst", "").strip()
+    if not path or not tconst or not tconst.startswith("tt"):
+        raise HTTPException(400, "path and IMDb tconst (tt…) required")
+    safe_path(path)
+
+    release_date: Optional[str] = None
+
+    # ── 1. Check local cache ──────────────────────────────────────────
+    try:
+        async with aiosqlite.connect(TMDB_DB_PATH) as db:
+            async with db.execute(
+                "SELECT release_date FROM tmdb_cache WHERE tconst=?", (tconst,)
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    release_date = row[0]
+    except Exception:
+        pass
+
+    # ── 2. Cache miss — fetch from TMDB API and store ─────────────────
+    if not release_date:
+        try:
+            data = await asyncio.to_thread(
+                _tmdb_api_get, f"/find/{tconst}", {"external_source": "imdb_id"}
+            )
+        except Exception as exc:
+            raise HTTPException(502, f"TMDB lookup failed: {exc}")
+
+        cache_row: Optional[tuple] = None
+        for item in (data.get("movie_results") or [])[:1]:
+            cache_row    = _tmdb_row_from_api(tconst, item, "movie")
+            release_date = cache_row[5]  # index of release_date in the tuple
+        if not cache_row:
+            for item in (data.get("tv_results") or [])[:1]:
+                cache_row    = _tmdb_row_from_api(tconst, item, "tv")
+                release_date = cache_row[5]
+
+        if cache_row:
+            try:
+                async with aiosqlite.connect(TMDB_DB_PATH) as db:
+                    await db.execute(_TMDB_INSERT, cache_row)
+                    await db.commit()
+            except Exception:
+                pass
+
+    # ── 3. Persist to file_imdb ───────────────────────────────────────
+    if release_date:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE file_imdb SET release_date=? WHERE path=?", (release_date, path)
+            )
+            await db.commit()
+    return {"ok": True, "release_date": release_date}
+
+
+@app.get("/imdb/status")
+async def imdb_status():
+    try:
+        async with aiosqlite.connect(IMDB_DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM imdb_titles") as cur:
+                count = (await cur.fetchone())[0]
+            async with db.execute("SELECT value FROM imdb_meta WHERE key='updated_at'") as cur:
+                row = await cur.fetchone()
+                updated_at = row[0] if row else None
+        return {"downloaded": count > 0, "count": count, "updated_at": updated_at,
+                "in_progress": _imdb_progress.get("phase") not in (None, "done", "error")}
+    except Exception:
+        return {"downloaded": False, "count": 0, "updated_at": None, "in_progress": False}
+
+
+@app.get("/imdb/search")
+async def imdb_search(q: str = Query(...), year: Optional[int] = Query(None), runtime: Optional[int] = Query(None)):
+    q = q.strip()
+    if not q:
+        return []
+    # Strip file extension if query looks like a filename (e.g. "Movie.mkv", "Title (2023).mp4")
+    q = re.sub(r'\.[a-zA-Z0-9]{2,5}$', '', q).strip()
+    if not q:
+        return []
+
+    q_norm = _norm_title(q)
+    cols = "t.tconst, t.primary_title, t.original_title, t.start_year, t.runtime_minutes, t.genres, c.cast_names, r.average_rating, t.title_type"
+    keys = ["tconst", "primary_title", "original_title", "start_year", "runtime_minutes", "genres", "cast_names", "average_rating", "title_type"]
+    from_clause = "imdb_titles t LEFT JOIN imdb_cast c ON t.tconst = c.tconst LEFT JOIN imdb_ratings r ON t.tconst = r.tconst"
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    def _rows(raw):
+        out = []
+        for r in raw:
+            d = dict(zip(keys, r))
+            if d["tconst"] not in seen:
+                seen.add(d["tconst"])
+                out.append(d)
+        return out
+
+    try:
+        async with aiosqlite.connect(IMDB_DB_PATH) as db:
+            # 0. Direct tconst lookup (e.g. tt1234567)
+            if re.match(r'^tt\d+$', q, re.IGNORECASE):
+                async with db.execute(
+                    f"SELECT {cols} FROM {from_clause} WHERE t.tconst=?", (q,)
+                ) as cur:
+                    results += _rows(await cur.fetchall())
+                return results  # tconst is unique, no need for further tiers
+
+            # 1. Exact normalised primary OR original title + year
+            if year:
+                async with db.execute(
+                    f"SELECT {cols} FROM {from_clause}"
+                    " WHERE (t.norm_title=? OR t.norm_original_title=?) AND t.start_year=?",
+                    (q_norm, q_norm, year)
+                ) as cur:
+                    results += _rows(await cur.fetchall())
+
+            # 2. Exact normalised primary OR original title, any year
+            if len(results) < 5:
+                async with db.execute(
+                    f"SELECT {cols} FROM {from_clause}"
+                    " WHERE t.norm_title=? OR t.norm_original_title=?"
+                    " ORDER BY t.start_year DESC LIMIT 10",
+                    (q_norm, q_norm)
+                ) as cur:
+                    results += _rows(await cur.fetchall())
+
+            # 3. FTS phrase search
+            if len(results) < 5:
+                try:
+                    fts_q = '"' + q_norm.replace('"', '""') + '"'
+                    async with db.execute(
+                        f"SELECT {cols} FROM {from_clause} WHERE t.rowid IN"
+                        " (SELECT rowid FROM imdb_fts WHERE imdb_fts MATCH ?)"
+                        " ORDER BY CASE WHEN t.start_year=? THEN 0 ELSE 1 END, t.start_year DESC LIMIT 20",
+                        (fts_q, year or 0)
+                    ) as cur:
+                        results += _rows(await cur.fetchall())
+                except Exception:
+                    pass
+
+            # 4. LIKE fallback on norm_title
+            if len(results) < 5:
+                async with db.execute(
+                    f"SELECT {cols} FROM {from_clause} WHERE t.norm_title LIKE ?"
+                    " ORDER BY CASE WHEN t.start_year=? THEN 0 ELSE 1 END, t.start_year DESC LIMIT 20",
+                    (f"%{q_norm}%", year or 0)
+                ) as cur:
+                    results += _rows(await cur.fetchall())
+    except Exception as exc:
+        log.error("IMDB search error: %s", exc)
+
+    # Sort by runtime proximity when caller provides a file duration (in minutes)
+    if runtime and results:
+        def _rt_key(r):
+            rm = r.get("runtime_minutes")
+            if rm is None:
+                return 9999
+            return abs(rm - runtime)
+        results.sort(key=_rt_key)
+
+    return results[:20]
+
+
+def _embed_file_meta_sync(path: str, tconst: str, title: str,
+                           year: Optional[int], genres: Optional[str],
+                           original_title: Optional[str] = None,
+                           runtime_minutes: Optional[int] = None) -> None:
+    """Write IMDB metadata into the file container (blocking, run in executor)."""
+    # Preserve mtime so tag writes don't make the file appear newly modified
+    stat = os.stat(path)
+    orig_times = (stat.st_atime, stat.st_mtime)
+
+    ext = Path(path).suffix.lower()
+    if ext == ".mkv":
+        # Build Matroska XML tags
+        tags_el = ET.Element("Tags")
+        tag_el  = ET.SubElement(tags_el, "Tag")
+        ET.SubElement(tag_el, "Targets")  # empty = global scope
+        for name, val in [
+            ("TITLE", title),
+            ("ORIGINAL_TITLE", original_title if original_title and original_title != title else None),
+            ("DATE_RELEASED", str(year) if year else None),
+            ("GENRE", genres),
+            ("IMDB", tconst),
+            ("RUNTIME", str(runtime_minutes) if runtime_minutes else None),
+        ]:
+            if val:
+                s = ET.SubElement(tag_el, "Simple")
+                ET.SubElement(s, "Name").text  = name
+                ET.SubElement(s, "String").text = val
+        tree = ET.ElementTree(tags_el)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         suffix=".xml", delete=False) as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write('<!DOCTYPE Tags SYSTEM "matroska-tags.dtd">\n')
+            tree.write(f, encoding="unicode")
+            tmpfile = f.name
+        try:
+            if not shutil.which("mkvpropedit"):
+                log.debug("mkvpropedit not found, skipping MKV tag embed for %s", path)
+                return
+            subprocess.run(
+                ["mkvpropedit", path,
+                 "--edit", "info", "--set", f"title={title}",
+                 "--tags", f"global:{tmpfile}"],
+                check=False, capture_output=True,
+            )
+        finally:
+            Path(tmpfile).unlink(missing_ok=True)
+
+    elif ext == ".mp4":
+        try:
+            from mutagen.mp4 import MP4, MP4FreeForm  # type: ignore
+        except ImportError:
+            log.debug("mutagen not installed, skipping MP4 tag embed for %s", path)
+            return
+        try:
+            tags = MP4(path)
+            if tags.tags is None:
+                tags.add_tags()
+            tags.tags["\xa9nam"] = [title]
+            if year:
+                tags.tags["\xa9day"] = [str(year)]
+            if genres:
+                tags.tags["\xa9gen"] = [genres.replace(",", ";")]
+            tags.tags["----:com.apple.iTunes:IMDB"] = [MP4FreeForm(tconst.encode())]
+            if original_title and original_title != title:
+                tags.tags["----:com.apple.iTunes:ORIGINAL_TITLE"] = [MP4FreeForm(original_title.encode())]
+            if runtime_minutes:
+                tags.tags["----:com.apple.iTunes:RUNTIME"] = [MP4FreeForm(str(runtime_minutes).encode())]
+            tags.save()
+        except Exception as exc:
+            log.warning("mutagen MP4 tag write failed for %s: %s", path, exc)
+
+    # Restore original mtime (and atime) so tag writes are invisible to the file browser
+    try:
+        os.utime(path, orig_times)
+    except Exception as exc:
+        log.debug("Could not restore mtime for %s: %s", path, exc)
+
+
+async def _embed_file_meta(path: str, tconst: str, title: str,
+                            year: Optional[int], genres: Optional[str],
+                            original_title: Optional[str] = None,
+                            runtime_minutes: Optional[int] = None) -> None:
+    try:
+        await asyncio.to_thread(_embed_file_meta_sync, path, tconst, title, year,
+                                genres, original_title, runtime_minutes)
+    except Exception as exc:
+        log.warning("embed_file_meta failed for %s: %s", path, exc)
+
+
+def _read_mp4_tconst_sync(path: str) -> Optional[str]:
+    """Read embedded tconst from MP4 iTunes freeform atom (blocking)."""
+    try:
+        from mutagen.mp4 import MP4  # type: ignore
+        tags = MP4(path).tags
+        if tags:
+            val = tags.get("----:com.apple.iTunes:IMDB")
+            if val:
+                return bytes(val[0]).decode("utf-8", errors="ignore").strip() or None
+    except Exception:
+        pass
+    return None
+
+
+@app.post("/imdb/match")
+async def imdb_match(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    path = body.get("path", "").strip()
+    tconst = body.get("tconst", "").strip()
+    if not path or not tconst:
+        raise HTTPException(400, "path and tconst required")
+    safe_path(path)  # security check
+    source       = body.get("source", "imdb")
+    release_date = (body.get("release_date") or "").strip() or None
+    rating_raw   = body.get("average_rating")
+    rating       = float(rating_raw) if rating_raw is not None else None
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO file_imdb "
+            "(path, tconst, primary_title, start_year, genres, runtime_minutes, source, release_date, rating) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (path, tconst, body.get("primary_title"), body.get("start_year"),
+             body.get("genres"), body.get("runtime_minutes"), source, release_date, rating)
+        )
+        await db.commit()
+    # Optionally set file mtime in the same request, avoiding a second round-trip
+    if body.get("set_dates"):
+        start_year = body.get("start_year")
+        if release_date and len(release_date) == 10:
+            yr, mo, dy = int(release_date[:4]), int(release_date[5:7]), int(release_date[8:10])
+            ts = datetime.datetime(yr, mo, dy, 12, 0, 0).timestamp()
+        elif start_year:
+            ts = datetime.datetime(int(start_year), 1, 1, 12, 0, 0).timestamp()
+        else:
+            ts = None
+        if ts:
+            await asyncio.to_thread(os.utime, path, (ts, ts))
+    # Embed metadata into the file container in the background (unless caller opted out)
+    # Skip metadata embedding for TMDB matches (no embedded tconst for non-IMDb IDs)
+    if body.get("embed_meta", True) and source == "imdb":
+        asyncio.create_task(_embed_file_meta(
+            path, tconst,
+            body.get("primary_title") or "",
+            body.get("start_year"),
+            body.get("genres"),
+            body.get("original_title"),
+            body.get("runtime_minutes"),
+        ))
+    return {"ok": True}
+
+
+@app.delete("/imdb/match")
+async def imdb_unmatch(path: str = Query(...)):
+    safe_path(path)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM file_imdb WHERE path=?", (path,))
+        await db.commit()
+    return {"ok": True}
+
+
+@app.post("/imdb/set-release-date")
+async def imdb_set_release_date(request: Request):
+    """Set file mtime (and atime) to Jan 1 of the IMDB release year."""
+    body = await request.json()
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(400, "path required")
+    safe_path(path)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT start_year, release_date FROM file_imdb WHERE path=?", (path,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or (not row[0] and not row[1]):
+        raise HTTPException(400, "No match with date for this file")
+    release_date = row[1]  # YYYY-MM-DD from TMDB, or None
+    if release_date and len(release_date) == 10:
+        yr, mo, dy = int(release_date[:4]), int(release_date[5:7]), int(release_date[8:10])
+        ts = datetime.datetime(yr, mo, dy, 12, 0, 0).timestamp()
+        return_date = release_date
+    else:
+        yr = int(row[0])
+        ts = datetime.datetime(yr, 1, 1, 12, 0, 0).timestamp()
+        return_date = str(yr)
+    await asyncio.to_thread(os.utime, path, (ts, ts))
+    return {"ok": True, "date": return_date}
+
+
+@app.post("/imdb/set-release-dates")
+async def imdb_set_release_dates(request: Request):
+    """Bulk-set mtime for all IMDB-matched files under a given directory."""
+    body = await request.json()
+    paths = body.get("paths") or []
+    updated = 0
+    errors = 0
+    for path in paths:
+        try:
+            safe_path(path)
+        except HTTPException:
+            errors += 1
+            continue
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT start_year, release_date FROM file_imdb WHERE path=?", (path,)
+                ) as cur:
+                    row = await cur.fetchone()
+            if row and (row[0] or row[1]):
+                rd = row[1]
+                if rd and len(rd) == 10:
+                    yr, mo, dy = int(rd[:4]), int(rd[5:7]), int(rd[8:10])
+                    ts = datetime.datetime(yr, mo, dy, 12, 0, 0).timestamp()
+                else:
+                    ts = datetime.datetime(int(row[0]), 1, 1, 12, 0, 0).timestamp()
+                await asyncio.to_thread(os.utime, path, (ts, ts))
+                updated += 1
+        except Exception as exc:
+            log.warning("set-release-date failed for %s: %s", path, exc)
+            errors += 1
+    return {"ok": True, "updated": updated, "errors": errors}
+
+
+def _setdates_thread() -> None:
+    """Background thread: set mtime for all IMDb-matched files, skipping those already correct.
+
+    For files whose file_imdb.release_date is NULL, checks tmdb_cache for a full date and
+    backfills file_imdb.release_date in the process.
+    """
+    global _setdates_progress
+    _setdates_progress = {"phase": "running", "done": 0, "total": 0,
+                          "skipped": 0, "updated": 0, "errors": 0, "error_log": []}
+    try:
+        import sqlite3 as _sq3
+
+        # Load tmdb_cache release dates (tconst → release_date) into memory
+        tmdb_dates: dict[str, str] = {}
+        try:
+            tc = _sq3.connect(TMDB_DB_PATH)
+            for row in tc.execute("SELECT tconst, release_date FROM tmdb_cache WHERE release_date IS NOT NULL"):
+                tmdb_dates[row[0]] = row[1]
+            tc.close()
+        except Exception:
+            pass  # tmdb.db may not exist
+
+        conn = _sq3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT path, tconst, start_year, release_date FROM file_imdb "
+            "WHERE start_year IS NOT NULL OR release_date IS NOT NULL"
+        ).fetchall()
+
+        total = len(rows)
+        _setdates_progress["total"] = total
+
+        for i, (fpath, tconst, start_year, release_date) in enumerate(rows):
+            _setdates_progress["done"] = i
+
+            # Backfill release_date from tmdb_cache if missing
+            if not release_date and tconst and tconst in tmdb_dates:
+                release_date = tmdb_dates[tconst]
+                conn.execute(
+                    "UPDATE file_imdb SET release_date=? WHERE path=?",
+                    (release_date, fpath)
+                )
+                conn.commit()
+
+            # Compute target timestamp
+            if release_date and len(release_date) == 10:
+                yr, mo, dy = int(release_date[:4]), int(release_date[5:7]), int(release_date[8:10])
+                ts = datetime.datetime(yr, mo, dy, 12, 0, 0).timestamp()
+            elif start_year:
+                ts = datetime.datetime(int(start_year), 1, 1, 12, 0, 0).timestamp()
+            else:
+                _setdates_progress["skipped"] += 1
+                continue
+            try:
+                p = Path(fpath)
+                if not p.exists():
+                    _setdates_progress["errors"] += 1
+                    _setdates_progress["error_log"].append(f"{Path(fpath).name}: file not found")
+                    continue
+                if abs(p.stat().st_mtime - ts) < 2.0:
+                    _setdates_progress["skipped"] += 1
+                    continue
+                os.utime(fpath, (ts, ts))
+                _setdates_progress["updated"] += 1
+            except Exception as exc:
+                log.warning("set-dates-bg: %s: %s", fpath, exc)
+                _setdates_progress["errors"] += 1
+                _setdates_progress["error_log"].append(f"{Path(fpath).name}: {exc}")
+
+        conn.close()
+        _setdates_progress["done"] = total
+        _setdates_progress["phase"] = "done"
+    except Exception as exc:
+        _setdates_progress["phase"] = "error"
+        _setdates_progress["error"] = str(exc)
+
+
+@app.post("/imdb/set-dates-bg")
+async def set_dates_bg():
+    if _setdates_progress.get("phase") == "running":
+        return {"error": "Already running"}
+    import threading
+    threading.Thread(target=_setdates_thread, daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/imdb/set-dates-progress")
+async def set_dates_progress_sse():
+    async def _gen():
+        while True:
+            p = dict(_setdates_progress)
+            yield f"data: {json.dumps(p)}\n\n"
+            if p.get("phase") in ("done", "error", "idle"):
+                break
+            await asyncio.sleep(0.5)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/imdb/set-dates-status")
+async def set_dates_status():
+    return _setdates_progress
+
+
+@app.get("/imdb/matches")
+async def imdb_matches(dir: str = Query(...)):
+    dir_path = safe_path(dir)
+    prefix = str(dir_path) + "/"
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT path, tconst, primary_title, start_year, genres, runtime_minutes, source, release_date, rating "
+            "FROM file_imdb WHERE path LIKE ?",
+            (prefix + "%",)
+        ) as cur:
+            rows = await cur.fetchall()
+    result = {}
+    for path, tconst, primary_title, start_year, genres, runtime_minutes, source, release_date, rating in rows:
+        # Only direct children (no further slashes beyond the prefix)
+        if "/" not in path[len(prefix):]:
+            result[path] = {
+                "tconst": tconst, "primary_title": primary_title,
+                "start_year": start_year, "genres": genres,
+                "runtime_minutes": runtime_minutes,
+                "source": source or "imdb",
+                "release_date": release_date,
+                "average_rating": rating,
+            }
+    return result
 
 
 async def init_db():
@@ -298,7 +1423,7 @@ async def run_ffprobe(path: Path) -> dict:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=codec_name,codec_type,width,height,color_transfer,color_primaries,color_space,profile:format=duration",
+            "stream=codec_name,codec_type,width,height,color_transfer,color_primaries,color_space,profile:format=duration,tags",
             "-of", "json", str(path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -316,7 +1441,11 @@ async def run_ffprobe(path: Path) -> dict:
         data = json.loads(stdout)
         video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
         audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
-        duration = float(data.get("format", {}).get("duration") or 0)
+        fmt = data.get("format", {})
+        duration = float(fmt.get("duration") or 0)
+        # Extract embedded IMDB tconst from container tags (MKV global tags)
+        fmt_tags = fmt.get("tags") or {}
+        embedded_tconst = fmt_tags.get("IMDB") or fmt_tags.get("imdb") or None
         return {
             "video_codec": video.get("codec_name", "N/A"),
             "audio_codec": audio.get("codec_name", "N/A"),
@@ -325,6 +1454,7 @@ async def run_ffprobe(path: Path) -> dict:
             "duration_min": round(duration / 60),
             "duration_sec": duration,
             "hdr_type": _hdr_type_from_stream(video),
+            "_embedded_tconst": embedded_tconst,
         }
     except Exception:
         log.warning("ffprobe parse failed for %s", path, exc_info=True)
@@ -358,6 +1488,10 @@ async def get_file_meta(db: aiosqlite.Connection, path: Path) -> dict:
             return dict(row)
 
     meta = await run_ffprobe(path)
+    embedded_tconst = meta.pop("_embedded_tconst", None)
+    # ffprobe doesn't surface iTunes freeform atoms — read MP4 tag via mutagen
+    if not embedded_tconst and path.suffix.lower() == ".mp4":
+        embedded_tconst = await asyncio.to_thread(_read_mp4_tconst_sync, str(path))
     meta.update({"path": str(path), "size": stat.st_size, "mtime": stat.st_mtime,
                  "scanned_at": time.time()})
     await db.execute(
@@ -366,6 +1500,36 @@ async def get_file_meta(db: aiosqlite.Connection, path: Path) -> dict:
            VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type)""",
         meta,
     )
+    # Restore IMDB match from embedded file tag if not already in DB
+    if embedded_tconst:
+        async with db.execute(
+            "SELECT 1 FROM file_imdb WHERE path=?", (str(path),)
+        ) as cur:
+            if not await cur.fetchone():
+                # Look up title/year from imdb.db to populate properly
+                imdb_info: dict = {}
+                try:
+                    async with aiosqlite.connect(IMDB_DB_PATH) as idb:
+                        async with idb.execute(
+                            "SELECT primary_title, start_year, genres, runtime_minutes"
+                            " FROM imdb_titles WHERE tconst=?", (embedded_tconst,)
+                        ) as icur:
+                            irow = await icur.fetchone()
+                            if irow:
+                                imdb_info = {
+                                    "primary_title": irow[0], "start_year": irow[1],
+                                    "genres": irow[2], "runtime_minutes": irow[3],
+                                }
+                except Exception:
+                    pass
+                await db.execute(
+                    "INSERT OR IGNORE INTO file_imdb"
+                    " (path, tconst, primary_title, start_year, genres, runtime_minutes)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (str(path), embedded_tconst, imdb_info.get("primary_title"),
+                     imdb_info.get("start_year"), imdb_info.get("genres"),
+                     imdb_info.get("runtime_minutes")),
+                )
     await db.commit()
     return meta
 
@@ -823,6 +1987,53 @@ async def rename_file(request: Request, path: str = Query(...), new_name: str = 
         await db.commit()
     _dir_listing_cache.pop(str(file_path.parent), None)
     return {"path": str(new_path), "name": new_path.name}
+
+
+@app.post("/move-to-folder")
+async def move_to_folder(request: Request):
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Missing or invalid delete token")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    paths: list = body.get("paths", [])
+    folder_name: str = body.get("folder", "").strip()
+    if not paths or not folder_name:
+        raise HTTPException(status_code=400, detail="paths and folder are required")
+    if "/" in folder_name or "\\" in folder_name or not folder_name:
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+
+    moved, errors = [], []
+    target_dir: Path | None = None
+    for raw_path in paths:
+        try:
+            src = safe_path(raw_path)
+            if not src.is_file():
+                errors.append({"path": raw_path, "error": "not a file"})
+                continue
+            dest_dir = src.parent / folder_name
+            dest_dir.mkdir(exist_ok=True)
+            if target_dir is None:
+                target_dir = dest_dir
+            dest = dest_dir / src.name
+            if dest.exists():
+                errors.append({"path": raw_path, "error": "destination exists"})
+                continue
+            src.rename(dest)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM file_meta WHERE path = ?", (str(dest),))
+                await db.execute(
+                    "UPDATE file_meta SET path = ? WHERE path = ?",
+                    (str(dest), str(src)),
+                )
+                await db.commit()
+            _dir_listing_cache.pop(str(src.parent), None)
+            moved.append(str(dest))
+        except Exception as exc:
+            errors.append({"path": raw_path, "error": str(exc)})
+
+    return {"moved": moved, "errors": errors, "folder": str(target_dir) if target_dir else None}
 
 
 @app.get("/file-info")
@@ -2019,6 +3230,26 @@ async def encode_info():
     except Exception:
         result["versions"]["ffprobe"] = None
 
+    # mkvtoolnix (mkvmerge) version
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "mkvmerge", "--version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(p.communicate(), timeout=5)
+        first = stdout.decode(errors="replace").splitlines()[0]
+        m = re.search(r"v(\S+)", first)
+        result["versions"]["mkvmerge"] = m.group(1) if m else first.strip()
+    except Exception:
+        result["versions"]["mkvmerge"] = None
+
+    # python3-mutagen version
+    try:
+        import importlib.metadata as _ilm
+        result["versions"]["mutagen"] = _ilm.version("mutagen")
+    except Exception:
+        result["versions"]["mutagen"] = None
+
     # Check which HEVC encoders are compiled into this ffmpeg build
     try:
         p = await asyncio.create_subprocess_exec(
@@ -2047,6 +3278,124 @@ async def encode_page(request: Request):
         "delete_token": DELETE_TOKEN,
         "ingress_path": request.state.ingress_path,
     })
+
+
+@app.get("/databases", response_class=HTMLResponse)
+async def databases_page(request: Request):
+    return templates.TemplateResponse("databases.html", {
+        "request": request,
+        "ingress_path": request.state.ingress_path,
+    })
+
+
+_dbclean_progress: dict = {"phase": "idle", "checked": 0, "total": 0,
+                           "meta_removed": 0, "imdb_removed": 0, "tmdb_removed": 0}
+
+
+def _dbclean_thread() -> None:
+    """Remove file_meta / file_imdb rows whose paths no longer exist, then prune tmdb_cache."""
+    global _dbclean_progress
+    _dbclean_progress = {"phase": "running", "checked": 0, "total": 0,
+                         "meta_removed": 0, "imdb_removed": 0, "tmdb_removed": 0}
+    try:
+        import sqlite3 as _sq3
+        conn = _sq3.connect(DB_PATH)
+
+        meta_paths  = [r[0] for r in conn.execute("SELECT path FROM file_meta").fetchall()]
+        imdb_paths  = [r[0] for r in conn.execute("SELECT path FROM file_imdb").fetchall()]
+        all_paths   = list(dict.fromkeys(meta_paths + imdb_paths))  # unique, order-preserving
+        total = len(all_paths)
+        _dbclean_progress["total"] = total
+
+        missing: set[str] = set()
+        for i, p in enumerate(all_paths):
+            _dbclean_progress["checked"] = i + 1
+            if not Path(p).exists():
+                missing.add(p)
+
+        if missing:
+            placeholders = ",".join("?" * len(missing))
+            args = list(missing)
+            meta_cur = conn.execute(
+                f"DELETE FROM file_meta WHERE path IN ({placeholders})", args)
+            _dbclean_progress["meta_removed"] = meta_cur.rowcount
+            imdb_cur = conn.execute(
+                f"DELETE FROM file_imdb WHERE path IN ({placeholders})", args)
+            _dbclean_progress["imdb_removed"] = imdb_cur.rowcount
+            conn.commit()
+
+        # Prune tmdb_cache entries whose tconst is no longer in file_imdb
+        try:
+            tc = _sq3.connect(TMDB_DB_PATH)
+            cur = tc.execute(
+                "DELETE FROM tmdb_cache WHERE tconst NOT IN "
+                f"(SELECT DISTINCT tconst FROM file_imdb WHERE tconst IS NOT NULL)"
+            )
+            _dbclean_progress["tmdb_removed"] = cur.rowcount
+            tc.commit()
+            tc.close()
+        except Exception:
+            pass
+
+        conn.close()
+        _dbclean_progress["phase"] = "done"
+    except Exception as exc:
+        _dbclean_progress["phase"] = "error"
+        _dbclean_progress["error"] = str(exc)
+
+
+@app.post("/db/clean")
+async def db_clean():
+    if _dbclean_progress.get("phase") == "running":
+        return {"error": "Already running"}
+    import threading
+    threading.Thread(target=_dbclean_thread, daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/db/clean-progress")
+async def db_clean_progress():
+    async def _gen():
+        while True:
+            p = dict(_dbclean_progress)
+            yield f"data: {json.dumps(p)}\n\n"
+            if p.get("phase") in ("done", "error", "idle"):
+                break
+            await asyncio.sleep(0.5)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/db/clean-status")
+async def db_clean_status():
+    return _dbclean_progress
+
+
+@app.get("/db/stats")
+async def db_stats():
+    import os
+    result: dict = {}
+    try:
+        result["app_db_size"] = os.path.getsize(DB_PATH)
+    except OSError:
+        result["app_db_size"] = 0
+    try:
+        result["imdb_db_size"] = os.path.getsize(IMDB_DB_PATH)
+    except OSError:
+        result["imdb_db_size"] = 0
+    try:
+        result["tmdb_db_size"] = os.path.getsize(TMDB_DB_PATH)
+    except OSError:
+        result["tmdb_db_size"] = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM file_meta") as cur:
+            result["file_count"] = (await cur.fetchone())[0]
+        try:
+            async with db.execute("SELECT COUNT(*) FROM file_imdb") as cur:
+                result["imdb_match_count"] = (await cur.fetchone())[0]
+        except Exception:
+            result["imdb_match_count"] = 0
+    return result
 
 
 @app.get("/encode/events")
