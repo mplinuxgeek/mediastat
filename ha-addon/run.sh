@@ -23,6 +23,14 @@ for i in $(seq 0 $((DIR_COUNT - 1))); do
     printf '  - label: "%s"\n    path: "%s"\n' "${LABEL}" "${PATH_VAL}" >> "${CONFIG_FILE}"
 done
 
+TMDB_KEY=$(bashio::config 'tmdb_api_key' 2>/dev/null || echo "")
+if [[ -n "${TMDB_KEY}" ]]; then
+    bashio::log.info "TMDB API key: configured"
+    printf 'tmdb_api_key: "%s"\n' "${TMDB_KEY}" >> "${CONFIG_FILE}"
+else
+    bashio::log.info "TMDB API key: not set"
+fi
+
 # Use the first directory's path as MEDIA_ROOT (the app's default browse root)
 MEDIA_ROOT_VAL=$(bashio::config 'directories[0].path')
 MEDIA_ROOT_VAL="${MEDIA_ROOT_VAL:-/media}"
