@@ -21,6 +21,7 @@ import yaml
 from cropdetect_utils import default_cropdetect_limit, extract_cropdetect_values, choose_dominant_crop
 from encode_output_resolution import derive_output_resolution
 from encode_stream_selection import build_stream_maps
+from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter, suggest_qp
 
 from contextlib import asynccontextmanager
 
@@ -3114,6 +3115,129 @@ async def _probe_video(path: Path) -> dict:
     return result
 
 
+_ESTIMATE_QPS = (16, 18, 20, 22)
+_ESTIMATE_SSIM_THRESHOLD = 0.98
+_ESTIMATE_SAMPLE_LENGTH = 60
+
+_estimate_state: dict = {"status": "idle", "results": [], "suggested_qp": None,
+                          "warning": None, "error": None, "current_qp": None}
+_estimate_subscribers: list[asyncio.Queue] = []
+
+
+def _broadcast_estimate() -> None:
+    msg = json.dumps({"type": "state", "state": _estimate_state})
+    dead = []
+    for q in _estimate_subscribers:
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        try:
+            _estimate_subscribers.remove(q)
+        except ValueError:
+            pass
+
+
+async def _run_estimate(path: str, config: dict) -> None:
+    global _estimate_state
+    tmp_dir: Optional[str] = None
+    try:
+        _estimate_state = {"status": "probing", "results": [], "suggested_qp": None,
+                            "warning": None, "error": None, "current_qp": None}
+        _broadcast_estimate()
+
+        input_path = Path(path)
+        info = await _probe_video(input_path)
+
+        start, length = sample_window(info["duration_sec"], _ESTIMATE_SAMPLE_LENGTH)
+
+        tmp_dir = tempfile.mkdtemp(prefix="mediastat-estimate-")
+        sample_path = Path(tmp_dir) / "sample.mkv"
+
+        _estimate_state["status"] = "extracting"
+        _broadcast_estimate()
+
+        extract_cmd = [
+            "ffmpeg", "-y", "-ss", str(start), "-i", str(input_path),
+            "-t", str(length), "-map", "0:v:0", "-c", "copy", str(sample_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *extract_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not sample_path.exists():
+            raise RuntimeError(f"sample extraction failed: {stderr.decode(errors='replace')[-500:]}")
+
+        sample_raw_bytes = sample_path.stat().st_size
+        source_size = input_path.stat().st_size
+
+        crop_filter = None
+        if config.get("crop"):
+            crop_filter = await _detect_crop(sample_path, length)
+
+        width = config.get("width")
+
+        for qp in _ESTIMATE_QPS:
+            _estimate_state["status"] = "encoding"
+            _estimate_state["current_qp"] = qp
+            _broadcast_estimate()
+
+            out_path = Path(tmp_dir) / f"qp{qp}.mkv"
+            cmd, _encoder = _build_ffmpeg_cmd(
+                str(sample_path), str(out_path), {**config, "qp": qp}, _hw_accel_info,
+                info["bit_depth"], info["is_hdr"], info["cp"], info["tc"], info["cs"], info["cr"],
+                crop_filter=crop_filter, a_streams=[], s_streams=[], source_fps=info["source_fps"],
+            )
+            t0 = time.time()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            seconds = time.time() - t0
+            if proc.returncode != 0 or not out_path.exists():
+                raise RuntimeError(f"QP{qp} encode failed: {stderr.decode(errors='replace')[-500:]}")
+
+            out_bytes = out_path.stat().st_size
+
+            ssim_filter = build_ssim_ref_filter(crop_filter, width)
+            ssim_cmd = [
+                "ffmpeg", "-i", str(out_path), "-i", str(sample_path),
+                "-lavfi", ssim_filter, "-f", "null", "-",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *ssim_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, ssim_stderr = await proc.communicate()
+            ssim = parse_ssim(ssim_stderr.decode(errors="replace"))
+
+            out_path.unlink(missing_ok=True)
+
+            _estimate_state["results"].append({
+                "qp": qp,
+                "bytes": out_bytes,
+                "pct_of_sample": round((out_bytes / sample_raw_bytes) * 100, 1) if sample_raw_bytes else None,
+                "ssim": ssim,
+                "seconds": round(seconds, 1),
+                "estimated_full_bytes": int(source_size * (out_bytes / sample_raw_bytes)) if sample_raw_bytes else None,
+            })
+            _broadcast_estimate()
+
+        suggested_qp, warning = suggest_qp(_estimate_state["results"], _ESTIMATE_SSIM_THRESHOLD)
+        _estimate_state["status"] = "done"
+        _estimate_state["suggested_qp"] = suggested_qp
+        _estimate_state["warning"] = warning
+        _broadcast_estimate()
+    except Exception as e:
+        _estimate_state["status"] = "error"
+        _estimate_state["error"] = str(e)
+        _broadcast_estimate()
+        log.warning("Estimate failed: %s", e)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def _run_encode_job(job_id: str) -> None:
     job = _encode_jobs.get(job_id)
     if not job or job.status == "cancelled":
@@ -3766,6 +3890,55 @@ async def encode_events(request: Request):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/encode/estimate")
+async def start_estimate(request: Request, path: str = Query(...)):
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if _estimate_state.get("status") in ("probing", "extracting", "encoding"):
+        raise HTTPException(status_code=409, detail="An estimate is already running")
+    file_path = safe_path(path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=400, detail="ffmpeg not found in PATH")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    config = _make_encode_config({**body, "qp": 18})
+    asyncio.create_task(_run_estimate(str(file_path), config))
+    return {"status": "started"}
+
+
+@app.get("/encode/estimate/events")
+async def estimate_events(request: Request):
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _estimate_subscribers.append(queue)
+    init_msg = json.dumps({"type": "state", "state": _estimate_state})
+
+    async def generate():
+        try:
+            yield f"data: {init_msg}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    yield 'data: {"type":"ping"}\n\n'
+        finally:
+            try:
+                _estimate_subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
