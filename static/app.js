@@ -103,6 +103,105 @@
         }
     }
 
+    // ── QP estimate ──────────────────────────────────────────────
+    let _estimateSource = null;
+
+    function _fmtBytes(n) {
+        if (n == null) return '—';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let i = 0, v = n;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return v.toFixed(1) + ' ' + units[i];
+    }
+
+    function _renderEstimateState(state) {
+        const rows = state.results.map(r => `
+            <tr data-qp="${r.qp}" style="${state.suggested_qp === r.qp ? 'font-weight:600' : ''}">
+                <td style="padding:4px">${r.qp}</td>
+                <td style="padding:4px">${_fmtBytes(r.bytes)}</td>
+                <td style="padding:4px">${r.pct_of_sample != null ? r.pct_of_sample + '%' : '—'}</td>
+                <td style="padding:4px">${r.ssim != null ? r.ssim.toFixed(4) : '—'}</td>
+                <td style="padding:4px">${r.seconds}s</td>
+                <td style="padding:4px">${_fmtBytes(r.estimated_full_bytes)}</td>
+            </tr>`).join('');
+        const pending = [16, 18, 20, 22].filter(qp => !state.results.some(r => r.qp === qp));
+        const pendingRows = pending.map(qp => `
+            <tr data-qp="${qp}" style="color:var(--muted)">
+                <td style="padding:4px">${qp}</td>
+                <td colspan="5" style="padding:4px">${state.current_qp === qp ? 'encoding…' : 'pending…'}</td>
+            </tr>`).join('');
+        document.getElementById('estimate-rows').innerHTML = rows + pendingRows;
+
+        const summary = document.getElementById('estimate-summary');
+        if (state.status === 'error') {
+            summary.innerHTML = `<span style="color:var(--danger,#c0392b)">Estimate failed: ${escHtml(state.error || 'unknown error')}</span>`;
+        } else if (state.status === 'done') {
+            let html = `<span>Suggested: <strong>QP ${state.suggested_qp}</strong></span>
+                <button class="btn btn-primary" style="padding:4px 10px;font-size:var(--fs-sm)" onclick="_useEstimatedQp(${state.suggested_qp})">Use QP ${state.suggested_qp}</button>`;
+            if (state.warning) html += `<span style="color:var(--muted);font-size:var(--fs-xs)">${escHtml(state.warning)}</span>`;
+            summary.innerHTML = html;
+        } else {
+            summary.innerHTML = '';
+        }
+    }
+
+    async function startEstimate() {
+        const path = document.getElementById('encode-file-path').value;
+        if (!path) return;
+        const btn = document.getElementById('estimate-btn');
+        btn.disabled = true;
+        document.getElementById('estimate-panel').style.display = 'block';
+        document.getElementById('estimate-rows').innerHTML = '';
+        document.getElementById('estimate-summary').innerHTML = '';
+
+        const config = {
+            preset:  document.getElementById('enc-preset').value,
+            codec:   document.getElementById('enc-codec').value,
+            gpu:     document.getElementById('enc-gpu').value,
+            format:  document.getElementById('enc-format').value,
+            denoise: document.getElementById('enc-denoise').value || null,
+            crop:    document.getElementById('enc-crop').checked,
+            lang:    document.getElementById('enc-lang').value.trim().toLowerCase() || 'eng',
+            width:   document.getElementById('enc-width').value ? parseInt(document.getElementById('enc-width').value, 10) : null,
+        };
+
+        try {
+            const resp = await fetch('/encode/estimate?path=' + encodeURIComponent(path), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+                body: JSON.stringify(config),
+            });
+            if (!resp.ok) {
+                const txt = await resp.text();
+                showToast('Estimate failed: ' + escHtml(txt), 'error');
+                btn.disabled = false;
+                return;
+            }
+        } catch (e) {
+            showToast('Error: ' + escHtml(e.message), 'error');
+            btn.disabled = false;
+            return;
+        }
+
+        if (_estimateSource) _estimateSource.close();
+        _estimateSource = new EventSource('/encode/estimate/events');
+        _estimateSource.onmessage = (evt) => {
+            const msg = JSON.parse(evt.data);
+            if (msg.type !== 'state') return;
+            _renderEstimateState(msg.state);
+            if (msg.state.status === 'done' || msg.state.status === 'error') {
+                btn.disabled = false;
+                _estimateSource.close();
+                _estimateSource = null;
+            }
+        };
+    }
+
+    function _useEstimatedQp(qp) {
+        document.getElementById('enc-qp').value = qp;
+        document.getElementById('estimate-panel').style.display = 'none';
+    }
+
     // ── Batch encode ─────────────────────────────────────────────
     let _batchMode = false;
 
