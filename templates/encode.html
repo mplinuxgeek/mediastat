@@ -302,6 +302,11 @@
         </div>
     </details>
 
+    <div class="bulk-actions" style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="job-action-btn" id="bulk-cancel-btn" onclick="bulkCancelJobs()" title="Cancel every running or queued job">✕ Cancel All Active</button>
+        <button class="job-action-btn" id="bulk-retry-btn" onclick="bulkRetryJobs()" title="Re-queue every cancelled or failed job">↻ Retry All Failed</button>
+        <button class="job-action-btn" id="bulk-dismiss-btn" onclick="bulkDismissJobs()" title="Remove every finished job from the list">🗑 Dismiss All Finished</button>
+    </div>
     <div id="jobs-list"></div>
     <div id="no-jobs" class="no-jobs">
         No encode jobs yet.<br>
@@ -504,8 +509,10 @@ function buildCard(job) {
     if (mi && (mi.video_codec || mi.audio_codec)) {
         const srcRes  = (mi.width && mi.height) ? `${mi.width}×${mi.height}` : '';
         const srcVid  = [mi.video_codec?.toUpperCase(), srcRes].filter(Boolean).join(' ');
+        const outW    = parseInt(job.output_width || 0, 10);
+        const outH    = parseInt(job.output_height || 0, 10);
         const cfgW    = job.config?.width;
-        const tgtRes  = cfgW ? `${cfgW}px` : srcRes;
+        const tgtRes  = (outW && outH) ? `${outW}×${outH}` : (cfgW ? `${cfgW}px` : srcRes);
         const tgtVid  = ['H.265', tgtRes].filter(Boolean).join(' ');
         const audio   = [mi.audio_codec?.toUpperCase(), mi.audio_count > 1 ? `×${mi.audio_count}` : ''].filter(Boolean).join(' ');
         const subs    = mi.sub_count ? `${mi.sub_count} sub${mi.sub_count !== 1 ? 's' : ''}` : '';
@@ -633,6 +640,24 @@ async function reorderJob(id, direction) {
         body: JSON.stringify({ direction }),
     });
 }
+
+async function _bulkAction(btnId, path, method, resultKey, label) {
+    const btn = document.getElementById(btnId);
+    const original = btn.textContent;
+    btn.disabled = true;
+    try {
+        const resp = await fetch(path, { method, headers: { 'X-Delete-Token': DELETE_TOKEN } });
+        const data = await resp.json().catch(() => ({}));
+        btn.textContent = resp.ok ? `${label}: ${data[resultKey] ?? 0}` : 'Failed';
+    } catch (e) {
+        btn.textContent = 'Failed';
+    } finally {
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
+    }
+}
+function bulkCancelJobs()  { _bulkAction('bulk-cancel-btn',  '/encode/bulk/cancel',  'DELETE', 'cancelled', 'Cancelled'); }
+function bulkRetryJobs()   { _bulkAction('bulk-retry-btn',   '/encode/bulk/retry',   'POST',   'retried',   'Retried'); }
+function bulkDismissJobs() { _bulkAction('bulk-dismiss-btn', '/encode/bulk/dismiss', 'DELETE', 'dismissed', 'Dismissed'); }
 
 function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');

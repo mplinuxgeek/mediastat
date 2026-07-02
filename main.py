@@ -3115,8 +3115,8 @@ async def _probe_video(path: Path) -> dict:
     return result
 
 
-_ESTIMATE_QPS = (16, 18, 20, 22)
-_ESTIMATE_SSIM_THRESHOLD = 0.98
+_ESTIMATE_QPS = tuple(range(16, 25))  # 16, 17, ..., 24
+_ESTIMATE_SSIM_THRESHOLD = 0.99
 _ESTIMATE_SAMPLE_LENGTH = 60
 
 _estimate_state: dict = {"status": "idle", "results": [], "suggested_qp": None,
@@ -3144,7 +3144,7 @@ async def _run_estimate(path: str, config: dict) -> None:
     tmp_dir: Optional[str] = None
     try:
         _estimate_state = {"status": "probing", "results": [], "suggested_qp": None,
-                            "warning": None, "error": None, "current_qp": None}
+                            "warning": None, "error": None, "current_qp": None, "qp_progress": 0.0}
         _broadcast_estimate()
 
         input_path = Path(path)
@@ -3181,6 +3181,7 @@ async def _run_estimate(path: str, config: dict) -> None:
         for qp in _ESTIMATE_QPS:
             _estimate_state["status"] = "encoding"
             _estimate_state["current_qp"] = qp
+            _estimate_state["qp_progress"] = 0.0
             _broadcast_estimate()
 
             out_path = Path(tmp_dir) / f"qp{qp}.mkv"
@@ -3190,14 +3191,54 @@ async def _run_estimate(path: str, config: dict) -> None:
                 crop_filter=crop_filter, a_streams=[], s_streams=[], source_fps=info["source_fps"],
             )
             t0 = time.time()
+            # _build_ffmpeg_cmd always appends "-progress pipe:1 -nostats", so
+            # stdout carries structured key=value progress lines (same format
+            # _run_encode_job parses) — read it to estimate a live percentage
+            # against the known sample length, since ffmpeg reports none itself.
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            stderr_chunks: list[bytes] = []
+
+            async def _drain_qp_stderr(p=proc):
+                async for raw in p.stderr:
+                    stderr_chunks.append(raw)
+
+            stderr_task = asyncio.create_task(_drain_qp_stderr())
+            duration_us = int(length * 1e6) if length else 0
+            last_broadcast = 0.0
+            buf = ""
+            while True:
+                chunk = await proc.stdout.read(512)
+                if not chunk:
+                    break
+                buf += chunk.decode(errors="replace")
+                lines = buf.split("\n")
+                buf = lines[-1]
+                for line in lines[:-1]:
+                    key, _, val = line.strip().partition("=")
+                    if key == "out_time_us" and duration_us:
+                        try:
+                            _estimate_state["qp_progress"] = min(99.0, int(val) / duration_us * 100)
+                        except (ValueError, ZeroDivisionError):
+                            pass
+                    if key in ("out_time_us", "fps"):
+                        now = time.monotonic()
+                        if now - last_broadcast >= 0.5:
+                            _broadcast_estimate()
+                            last_broadcast = now
+
+            await proc.wait()
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+            stderr = b"".join(stderr_chunks)
             seconds = time.time() - t0
             if proc.returncode != 0 or not out_path.exists():
                 raise RuntimeError(f"QP{qp} encode failed: {stderr.decode(errors='replace')[-500:]}")
 
+            _estimate_state["qp_progress"] = 100.0
             out_bytes = out_path.stat().st_size
 
             ssim_filter = build_ssim_ref_filter(crop_filter, width)
@@ -3960,6 +4001,8 @@ async def start_encode(request: Request, path: str = Query(...)):
 
     config = _make_encode_config(body)
 
+    await _check_free_space(file_path.parent, [file_path])
+
     fmt = config["format"]
     _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
     base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
@@ -3986,6 +4029,37 @@ async def start_encode(request: Request, path: str = Query(...)):
     await _save_encode_job(job)
     _enqueue_job(job_id)
     return {"job_id": job_id, "output": str(output_path)}
+
+
+def _total_size(paths: list[Path]) -> int:
+    total = 0
+    for p in paths:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+async def _check_free_space(output_dir: Path, sources: list[Path]) -> None:
+    """Raise 507 if the volume under output_dir doesn't have enough free
+    space for the given source file(s). Encode output lands next to its
+    source, and while transcoded output is usually smaller, we use total
+    source size as a conservative required-space estimate. Best-effort:
+    if disk_usage itself fails, don't block the encode over it."""
+    try:
+        st = await asyncio.to_thread(shutil.disk_usage, str(output_dir))
+    except OSError:
+        return
+    required = await asyncio.to_thread(_total_size, sources)
+    if st.free < required:
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                f"Not enough free space to encode {len(sources)} file(s): "
+                f"need ~{human_size(required)}, only {human_size(st.free)} free"
+            ),
+        )
 
 
 def _make_encode_config(body: dict) -> dict:
@@ -4065,6 +4139,8 @@ async def start_folder_encode(request: Request, path: str = Query(...)):
 
     media_files = await asyncio.to_thread(_walk_media, folder)
 
+    await _check_free_space(folder, media_files)
+
     queued: list[str] = []
     for fpath in media_files:
         job_id = _queue_file_encode(fpath, config)
@@ -4078,6 +4154,90 @@ async def start_folder_encode(request: Request, path: str = Query(...)):
     return {"queued": len(queued), "total": len(media_files)}
 
 
+def _cancel_job(job: EncodeJob) -> None:
+    """Mark a job cancelled, drop it from the queue, and kill its process if running."""
+    job.status = "cancelled"
+    job.finished_at = time.time()
+    try:
+        _encode_queue_list.remove(job.id)
+        _broadcast_queue_order()
+    except ValueError:
+        pass
+    if job._proc and job._proc.returncode is None:
+        try:
+            job._proc.kill()
+        except Exception:
+            pass
+
+
+def _reset_job_for_retry(job: EncodeJob) -> None:
+    """Reset a cancelled/failed job's transient fields so it can be re-queued."""
+    job.status = "queued"
+    job.progress = 0.0
+    job.current_fps = 0.0
+    job.avg_fps = 0.0
+    job.eta = "--"
+    job.encoder = ""
+    job.output_size = 0
+    job.started_at = 0.0
+    job.finished_at = None
+    job.error = None
+    job._proc = None
+
+
+async def _dismiss_job(job_id: str) -> None:
+    """Drop a job from the in-memory list and DB, and tell subscribers it's gone."""
+    await _delete_encode_job_db(job_id)
+    msg = json.dumps({"type": "remove", "job_id": job_id})
+    for q in _encode_subscribers:
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            pass
+
+
+# NOTE: these three bulk routes must stay registered before the /encode/{job_id}...
+# routes below — {job_id} is a wildcard path param that would otherwise swallow
+# a request to e.g. /encode/bulk/retry (job_id="bulk") before it gets here.
+@app.delete("/encode/bulk/cancel")
+async def bulk_cancel_encode(request: Request):
+    """Cancel every running/queued job in one call."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    targets = [j for j in _encode_jobs.values() if j.status in ("running", "queued")]
+    for job in targets:
+        _cancel_job(job)
+        _notify_encode(job.id)
+        await _save_encode_job(job)
+    return {"cancelled": len(targets)}
+
+
+@app.post("/encode/bulk/retry")
+async def bulk_retry_encode(request: Request):
+    """Re-queue every cancelled/failed job in one call."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    targets = [j for j in _encode_jobs.values() if j.status in ("cancelled", "failed")]
+    for job in targets:
+        _reset_job_for_retry(job)
+        _notify_encode(job.id)
+        await _save_encode_job(job)
+        _enqueue_job(job.id)
+    return {"retried": len(targets)}
+
+
+@app.delete("/encode/bulk/dismiss")
+async def bulk_dismiss_encode(request: Request):
+    """Remove every finished (done/cancelled/failed) job in one call."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    target_ids = [jid for jid, j in _encode_jobs.items() if j.status in ("done", "cancelled", "failed")]
+    for job_id in target_ids:
+        _encode_jobs.pop(job_id, None)
+        await _dismiss_job(job_id)
+    return {"dismissed": len(target_ids)}
+
+
 @app.delete("/encode/{job_id}")
 async def cancel_encode(job_id: str, request: Request):
     """Cancel a running or queued job. Keeps it in the list for retry/dismiss."""
@@ -4088,18 +4248,7 @@ async def cancel_encode(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status not in ("running", "queued"):
         raise HTTPException(status_code=409, detail="Job is not active")
-    job.status = "cancelled"
-    job.finished_at = time.time()
-    try:
-        _encode_queue_list.remove(job_id)
-        _broadcast_queue_order()
-    except ValueError:
-        pass
-    if job._proc and job._proc.returncode is None:
-        try:
-            job._proc.kill()
-        except Exception:
-            pass
+    _cancel_job(job)
     _notify_encode(job_id)
     await _save_encode_job(job)
     return Response(status_code=204)
@@ -4115,17 +4264,7 @@ async def retry_encode(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status not in ("cancelled", "failed"):
         raise HTTPException(status_code=409, detail="Job is not in a retryable state")
-    job.status = "queued"
-    job.progress = 0.0
-    job.current_fps = 0.0
-    job.avg_fps = 0.0
-    job.eta = "--"
-    job.encoder = ""
-    job.output_size = 0
-    job.started_at = 0.0
-    job.finished_at = None
-    job.error = None
-    job._proc = None
+    _reset_job_for_retry(job)
     _notify_encode(job_id)
     await _save_encode_job(job)
     _enqueue_job(job_id)
@@ -4142,24 +4281,8 @@ async def dismiss_encode(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status in ("running", "queued"):
         # Safety: kill if somehow still active
-        job.status = "cancelled"
-        try:
-            _encode_queue_list.remove(job_id)
-            _broadcast_queue_order()
-        except ValueError:
-            pass
-        if job._proc and job._proc.returncode is None:
-            try:
-                job._proc.kill()
-            except Exception:
-                pass
-    await _delete_encode_job_db(job_id)
-    msg = json.dumps({"type": "remove", "job_id": job_id})
-    for q in _encode_subscribers:
-        try:
-            q.put_nowait(msg)
-        except asyncio.QueueFull:
-            pass
+        _cancel_job(job)
+    await _dismiss_job(job_id)
     return Response(status_code=204)
 
 
