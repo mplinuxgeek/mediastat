@@ -18,6 +18,9 @@ from urllib.parse import quote, urlencode
 from typing import Optional
 
 import yaml
+from cropdetect_utils import default_cropdetect_limit, extract_cropdetect_values, choose_dominant_crop
+from encode_output_resolution import derive_output_resolution
+from encode_stream_selection import build_stream_maps
 
 from contextlib import asynccontextmanager
 
@@ -316,13 +319,18 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
         imdb_conn = _sq3.connect(IMDB_DB_PATH)
         imdb_conn.row_factory = None
 
-        # Collect all file paths, excluding already-matched ones unless force_rescan
+        # Collect all media files recursively from current_root
+        all_paths = []
+        for dirpath, _, filenames in os.walk(str(current_root)):
+            for fname in sorted(filenames):
+                if os.path.splitext(fname)[1].lower() in MEDIA_EXTENSIONS:
+                    all_paths.append(os.path.join(dirpath, fname))
+
         if force_rescan:
-            paths = [r[0] for r in app_conn.execute("SELECT path FROM file_meta").fetchall()]
+            paths = all_paths
         else:
             matched = {r[0] for r in app_conn.execute("SELECT path FROM file_imdb").fetchall()}
-            paths   = [r[0] for r in app_conn.execute("SELECT path FROM file_meta").fetchall()
-                       if r[0] not in matched]
+            paths   = [p for p in all_paths if p not in matched]
 
         total = len(paths)
         _imdbscan_progress["total"] = total
@@ -1498,7 +1506,7 @@ async def set_dates_status():
 async def imdb_scan_page(request: Request):
     return templates.TemplateResponse("imdb_scan.html", {
         "request": request,
-        "ingress_path": _ingress_prefix(request),
+        "ingress_path": request.state.ingress_path,
         "delete_token": DELETE_TOKEN,
         "tmdb_configured": bool(_config.get("tmdb_api_key")),
     })
@@ -2448,7 +2456,7 @@ class EncodeJob:
         "config", "status", "progress", "current_fps", "avg_fps",
         "eta", "encoder", "input_size", "output_size",
         "started_at", "finished_at", "error", "created_at",
-        "input_media_info", "moved",
+        "input_media_info", "output_width", "output_height", "moved",
         "_proc", "_task",
     )
 
@@ -2473,6 +2481,8 @@ class EncodeJob:
         self.error: str | None = None
         self.created_at: float = created_at if created_at is not None else time.time()
         self.input_media_info: dict = {}
+        self.output_width = int(config.get("_derived_output_width") or 0)
+        self.output_height = int(config.get("_derived_output_height") or 0)
         self.moved: bool = False
         self._proc = None
         self._task = None
@@ -2824,6 +2834,7 @@ def _build_ffmpeg_cmd(
     color_primaries: str = "", transfer_characteristics: str = "",
     color_space: str = "", color_range: str = "",
     crop_filter: Optional[str] = None, a_streams: Optional[list] = None,
+    s_streams: Optional[list] = None,
     source_fps: Optional[float] = None,
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
@@ -2964,23 +2975,8 @@ def _build_ffmpeg_cmd(
     # container doesn't support (e.g. PGS subs in MP4) rather than failing.
     cmd += ["-c:a", "copy", "-c:s", "copy"]
     lang = config.get("lang")
-    if lang and a_streams:
-        # Map only video, audio matching requested language (or untagged), and subtitles
-        stream_tags = [(s.get("tags") or {}) for s in a_streams]
-        matched_audio = [
-            idx for idx, tags in enumerate(stream_tags)
-            if not (tags.get("language") or tags.get("LANGUAGE") or "")
-            or (tags.get("language") or tags.get("LANGUAGE") or "").lower() in (lang.lower(), "und")
-        ]
-        if matched_audio:
-            cmd += ["-map", "0:v", "-map", "0:s?"]
-            for idx in matched_audio:
-                cmd += ["-map", f"0:a:{idx}"]
-            cmd += ["-ignore_unknown"]
-        else:
-            cmd += ["-map", "0", "-ignore_unknown"]
-    else:
-        cmd += ["-map", "0", "-ignore_unknown"]
+    cmd += build_stream_maps(lang, a_streams, s_streams) if lang else ["-map", "0"]
+    cmd += ["-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += [output_path]
@@ -2996,14 +2992,25 @@ def _validated_lang(value: object) -> str:
 
 
 async def _detect_crop(path: Path, duration: Optional[float]) -> Optional[str]:
-    """Run cropdetect on a 2-minute sample. Returns 'W:H:X:Y' string or None."""
-    sample_start = int((duration or 0) * 0.1) if duration and duration > 120 else 60
-    cmd = [
-        "ffmpeg", "-ss", str(sample_start), "-i", str(path),
-        "-t", "120", "-vf", "cropdetect=limit=24:round=2:reset=0",
-        "-f", "null", "-",
-    ]
-    try:
+    """Run cropdetect on multiple samples. Returns dominant 'W:H:X:Y' crop or None."""
+    sample_count = 6
+    sample_duration = 20
+    crop_limit = f"{default_cropdetect_limit():.6f}"
+    if duration and duration > sample_duration:
+        max_start = max(duration - sample_duration, 0)
+        sample_starts = [
+            int(min(max_start, max(0, (duration * frac) - (sample_duration / 2))))
+            for frac in (0.08, 0.22, 0.36, 0.50, 0.64, 0.78)
+        ]
+    else:
+        sample_starts = [30, 60, 90, 120, 150, 180]
+
+    async def _sample(sample_start: int) -> list[str]:
+        cmd = [
+            "ffmpeg", "-ss", str(sample_start), "-i", str(path),
+            "-t", str(sample_duration), "-vf", f"cropdetect=limit={crop_limit}:round=2:reset=0",
+            "-f", "null", "-",
+        ]
         async with _PROBE_SEM:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -3011,19 +3018,98 @@ async def _detect_crop(path: Path, duration: Optional[float]) -> Optional[str]:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=150)
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                return None
-        crops = [l for l in stderr.decode(errors="replace").splitlines()
-                 if "crop=" in l and "Parsed_cropdetect" in l]
-        if not crops:
-            return None
-        m = re.search(r'crop=(\d+:\d+:\d+:\d+)', crops[-1])
-        return m.group(1) if m else None
+                return []
+        return extract_cropdetect_values(stderr.decode(errors="replace"))
+
+    try:
+        sample_groups = await asyncio.gather(
+            *(_sample(s) for s in sample_starts[:sample_count])
+        )
+        return choose_dominant_crop(sample_groups, min_samples=2)
     except Exception:
         return None
+
+
+async def _probe_video(path: Path) -> dict:
+    """ffprobe a media file for encode-relevant metadata. Never raises —
+    returns safe defaults and logs a warning on failure."""
+    result = {
+        "bit_depth": None, "is_hdr": False, "is_dv": False,
+        "duration_sec": None, "source_fps": None,
+        "cp": "", "tc": "", "cs": "", "cr": "",
+        "vst": {}, "a_streams": [], "s_streams": [],
+        "media_info": {
+            "video_codec": "", "width": 0, "height": 0,
+            "audio_codec": "", "audio_count": 0, "sub_count": 0,
+        },
+    }
+    try:
+        async with _PROBE_SEM:
+            p = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error",
+                "-analyzeduration", "100M", "-probesize", "100M",
+                "-show_streams", "-show_format",
+                "-of", "json", str(path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(p.communicate(), timeout=30)
+        probe = json.loads(stdout)
+        streams = probe.get("streams", [])
+        v_streams = [s for s in streams if s.get("codec_type") == "video"]
+        a_streams = [s for s in streams if s.get("codec_type") == "audio"]
+        s_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
+        vst = v_streams[0] if v_streams else {}
+        ast = a_streams[0] if a_streams else {}
+        bps = vst.get("bits_per_raw_sample")
+        bit_depth = None
+        if bps:
+            bit_depth = int(bps)
+        elif "pix_fmt" in vst:
+            m = re.search(r"(\d+)(?:le|be)$", vst["pix_fmt"])
+            if m:
+                bit_depth = int(m.group(1))
+        cp = vst.get("color_primaries", "")
+        tc = vst.get("transfer_characteristics", "")
+        cs = vst.get("color_space", "")
+        cr = vst.get("color_range", "")
+        is_hdr = cp == "bt2020" or tc in ("smpte2084", "arib-std-b67")
+        is_dv = False
+        for sd in vst.get("side_data_list", []):
+            if "dovi" in sd.get("side_data_type", "").lower():
+                is_dv = True
+                break
+        duration_sec = None
+        try:
+            duration_sec = float(probe.get("format", {}).get("duration") or 0) or None
+        except (TypeError, ValueError):
+            pass
+        source_fps = None
+        try:
+            _fn, _fd = (vst.get("r_frame_rate") or "0/1").split("/")
+            source_fps = round(int(_fn) / max(int(_fd), 1), 3) or None
+        except (ValueError, ZeroDivisionError):
+            pass
+        result.update({
+            "bit_depth": bit_depth, "is_hdr": is_hdr, "is_dv": is_dv,
+            "duration_sec": duration_sec, "source_fps": source_fps,
+            "cp": cp, "tc": tc, "cs": cs, "cr": cr,
+            "vst": vst, "a_streams": a_streams, "s_streams": s_streams,
+            "media_info": {
+                "video_codec": vst.get("codec_name", ""),
+                "width": vst.get("width", 0),
+                "height": vst.get("height", 0),
+                "audio_codec": ast.get("codec_name", ""),
+                "audio_count": len(a_streams),
+                "sub_count": len(s_streams),
+            },
+        })
+    except Exception as e:
+        log.warning("Probe %s: could not get stream info: %s", path, e)
+    return result
 
 
 async def _run_encode_job(job_id: str) -> None:
@@ -3038,70 +3124,21 @@ async def _run_encode_job(job_id: str) -> None:
 
         input_path = Path(job.input_path)
 
-        # Probe all streams + format: HDR/bit-depth/DV detection, duration for progress
-        bit_depth: Optional[int] = None
-        is_hdr = False
-        is_dv  = False
-        duration_sec: Optional[float] = None
-        source_fps: Optional[float] = None
-        cp = tc = cs = cr = ""
-        try:
-            async with _PROBE_SEM:
-                p = await asyncio.create_subprocess_exec(
-                    "ffprobe", "-v", "error",
-                    "-analyzeduration", "100M", "-probesize", "100M",
-                    "-show_streams", "-show_format",
-                    "-of", "json", str(input_path),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await asyncio.wait_for(p.communicate(), timeout=30)
-            probe = json.loads(stdout)
-            streams = probe.get("streams", [])
-            v_streams = [s for s in streams if s.get("codec_type") == "video"]
-            a_streams = [s for s in streams if s.get("codec_type") == "audio"]
-            s_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
-            vst = v_streams[0] if v_streams else {}
-            ast = a_streams[0] if a_streams else {}
-            bps = vst.get("bits_per_raw_sample")
-            if bps:
-                bit_depth = int(bps)
-            elif "pix_fmt" in vst:
-                m = re.search(r"(\d+)(?:le|be)$", vst["pix_fmt"])
-                if m:
-                    bit_depth = int(m.group(1))
-            cp = vst.get("color_primaries", "")
-            tc = vst.get("transfer_characteristics", "")
-            cs = vst.get("color_space", "")
-            cr = vst.get("color_range", "")
-            is_hdr = cp == "bt2020" or tc in ("smpte2084", "arib-std-b67")
-            # Dolby Vision: detected via side_data RPU entry
-            for sd in vst.get("side_data_list", []):
-                if "dovi" in sd.get("side_data_type", "").lower():
-                    is_dv = True
-                    break
-            if is_dv:
-                log.warning("Encode %s: Dolby Vision detected — DV RPU metadata cannot be "
-                            "preserved through re-encoding; output will be HDR10/HLG", job_id[:8])
-            try:
-                duration_sec = float(probe.get("format", {}).get("duration") or 0) or None
-            except (TypeError, ValueError):
-                pass
-            try:
-                _fn, _fd = (vst.get("r_frame_rate") or "0/1").split("/")
-                source_fps = round(int(_fn) / max(int(_fd), 1), 3) or None
-            except (ValueError, ZeroDivisionError):
-                pass
-            job.input_media_info = {
-                "video_codec": vst.get("codec_name", ""),
-                "width":       vst.get("width", 0),
-                "height":      vst.get("height", 0),
-                "audio_codec": ast.get("codec_name", ""),
-                "audio_count": len(a_streams),
-                "sub_count":   len(s_streams),
-            }
-            _notify_encode(job_id)
-        except Exception as e:
-            log.warning("Encode %s: could not get stream info: %s", job_id[:8], e)
+        info = await _probe_video(input_path)
+        bit_depth    = info["bit_depth"]
+        is_hdr       = info["is_hdr"]
+        is_dv        = info["is_dv"]
+        duration_sec = info["duration_sec"]
+        source_fps   = info["source_fps"]
+        cp, tc, cs, cr = info["cp"], info["tc"], info["cs"], info["cr"]
+        vst        = info["vst"]
+        a_streams  = info["a_streams"]
+        s_streams  = info["s_streams"]
+        job.input_media_info = info["media_info"]
+        if is_dv:
+            log.warning("Encode %s: Dolby Vision detected — DV RPU metadata cannot be "
+                        "preserved through re-encoding; output will be HDR10/HLG", job_id[:8])
+        _notify_encode(job_id)
 
         crop_filter: Optional[str] = None
         if job.config.get("crop"):
@@ -3131,10 +3168,19 @@ async def _run_encode_job(job_id: str) -> None:
             else:
                 log.info("Encode %s: cropdetect found no crop", job_id[:8])
 
+        job.output_width, job.output_height = derive_output_resolution(
+            vst.get("width"),
+            vst.get("height"),
+            crop_filter,
+            job.config.get("width"),
+        )
+        job.config["_derived_output_width"] = job.output_width
+        job.config["_derived_output_height"] = job.output_height
+
         cmd, encoder = _build_ffmpeg_cmd(
             job.input_path, job.output_path, job.config, _hw_accel_info,
             bit_depth, is_hdr, cp, tc, cs, cr,
-            crop_filter=crop_filter, a_streams=a_streams, source_fps=source_fps,
+            crop_filter=crop_filter, a_streams=a_streams, s_streams=s_streams, source_fps=source_fps,
         )
         job.encoder = encoder
         try:
