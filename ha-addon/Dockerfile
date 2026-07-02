@@ -39,6 +39,10 @@ RUN python3 -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY cropdetect_utils.py .
+COPY encode_output_resolution.py .
+COPY encode_stream_selection.py .
+COPY encode_estimate.py .
 COPY templates/ templates/
 COPY static/ static/
 

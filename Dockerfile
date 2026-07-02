@@ -1,12 +1,10 @@
-FROM python:3.12-slim
-
-# Enable contrib and non-free repos for Intel VA-API drivers
-RUN sed -i 's/ main$/ main contrib non-free non-free-firmware/' \
-        /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+FROM nvidia/cuda:12.6.0-base-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
         ffmpeg \
-        handbrake-cli \
+        mkvtoolnix \
         # Intel QSV: iHD driver (Gen8+) and i965 driver (older)
         intel-media-va-driver-non-free \
         i965-va-driver-shaders \
@@ -20,10 +18,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY main.py .
+COPY cropdetect_utils.py .
+COPY encode_output_resolution.py .
+COPY encode_stream_selection.py .
+COPY encode_estimate.py .
 COPY templates/ templates/
+COPY static/ static/
 
 RUN mkdir -p /data /media
 
