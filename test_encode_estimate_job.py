@@ -61,6 +61,26 @@ class ProbeVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(info["duration_sec"])
         self.assertEqual(info["a_streams"], [])
 
+    async def test_probe_failure_sets_ok_false(self):
+        async def _boom(*args, **kwargs):
+            raise OSError("ffprobe not found")
+
+        with unittest.mock.patch.object(asyncio, "create_subprocess_exec", side_effect=_boom):
+            info = await main._probe_video(main.Path("/tmp/does-not-exist.mkv"))
+
+        self.assertFalse(info["ok"])
+
+    async def test_probe_success_sets_ok_true(self):
+        async def _fake_exec(*args, **kwargs):
+            proc = unittest.mock.AsyncMock()
+            proc.communicate = unittest.mock.AsyncMock(return_value=(_fake_probe_json(), b""))
+            return proc
+
+        with unittest.mock.patch.object(asyncio, "create_subprocess_exec", side_effect=_fake_exec):
+            info = await main._probe_video(main.Path("/tmp/does-not-exist.mkv"))
+
+        self.assertTrue(info["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

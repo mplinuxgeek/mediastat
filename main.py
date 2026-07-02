@@ -3046,6 +3046,7 @@ async def _probe_video(path: Path) -> dict:
             "video_codec": "", "width": 0, "height": 0,
             "audio_codec": "", "audio_count": 0, "sub_count": 0,
         },
+        "ok": False,
     }
     try:
         async with _PROBE_SEM:
@@ -3106,6 +3107,7 @@ async def _probe_video(path: Path) -> dict:
                 "audio_count": len(a_streams),
                 "sub_count": len(s_streams),
             },
+            "ok": True,
         })
     except Exception as e:
         log.warning("Probe %s: could not get stream info: %s", path, e)
@@ -3134,11 +3136,12 @@ async def _run_encode_job(job_id: str) -> None:
         vst        = info["vst"]
         a_streams  = info["a_streams"]
         s_streams  = info["s_streams"]
-        job.input_media_info = info["media_info"]
+        if info["ok"]:
+            job.input_media_info = info["media_info"]
+            _notify_encode(job_id)
         if is_dv:
             log.warning("Encode %s: Dolby Vision detected — DV RPU metadata cannot be "
                         "preserved through re-encoding; output will be HDR10/HLG", job_id[:8])
-        _notify_encode(job_id)
 
         crop_filter: Optional[str] = None
         if job.config.get("crop"):
