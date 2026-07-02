@@ -81,7 +81,11 @@
             </div>
             <div class="encode-field-grid">
                 <span class="encode-field-label">Quality (QP)</span>
-                <input id="enc-qp" type="number" min="10" max="51" value="18" class="modal-input" style="width:72px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <input id="enc-qp" type="number" min="10" max="51" value="18" class="modal-input" style="width:72px">
+                    <button id="estimate-btn" type="button" class="btn" style="padding:4px 10px;font-size:var(--fs-sm)"
+                            onclick="startEstimate()" title="Encode a 60s sample from the middle at QP 16/18/20/22 and suggest a value">📈 Estimate</button>
+                </div>
                 <span class="encode-field-hint">16 ≈ near-lossless · 18–20 high quality · 20–22 good · lower = better</span>
 
                 <span class="encode-field-label">Encoder speed</span>
@@ -148,6 +152,23 @@
                     <option value="none">Software</option>
                 </select>
                 <span></span>
+            </div>
+            <div id="estimate-panel" style="display:none;margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:6px">
+                <div style="font-size:var(--fs-sm);color:var(--muted);margin-bottom:8px">Sampling 60s from the middle of the file…</div>
+                <table style="width:100%;border-collapse:collapse;font-size:var(--fs-sm)">
+                    <thead>
+                        <tr style="text-align:left;color:var(--muted)">
+                            <th style="padding:4px">QP</th>
+                            <th style="padding:4px">Size</th>
+                            <th style="padding:4px">% of raw</th>
+                            <th style="padding:4px">SSIM</th>
+                            <th style="padding:4px">Time</th>
+                            <th style="padding:4px">Est. full file</th>
+                        </tr>
+                    </thead>
+                    <tbody id="estimate-rows"></tbody>
+                </table>
+                <div id="estimate-summary" style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"></div>
             </div>
             <input type="hidden" id="encode-file-path">
             <div class="modal-actions">
