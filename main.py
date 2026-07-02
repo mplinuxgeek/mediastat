@@ -65,6 +65,11 @@ _config = _load_config()
 # Optional TMDB API key — set tmdb_api_key in config.yaml to enable TMDB search
 TMDB_API_KEY: str = (_config.get("tmdb_api_key") or "").strip()
 
+# Finished (done/cancelled/failed) encode jobs older than this are pruned on
+# startup and periodically thereafter, so the job list/DB don't grow forever.
+# Set encode_job_retention_days: 0 (or negative) in config.yaml to disable.
+ENCODE_JOB_RETENTION_DAYS: float = float(_config.get("encode_job_retention_days", 30))
+
 # Directories listed in config.yaml: [{label, path}, ...]
 CONFIGURED_DIRS: list[dict] = [
     {"label": d.get("label", ""), "path": str(Path(d["path"]).expanduser())}
@@ -155,10 +160,16 @@ async def lifespan(app: FastAPI):
         log.info("GPU encoder  : none detected — software libx265 will be used")
     await _load_encode_jobs()
     worker = asyncio.create_task(_encode_worker())
+    retention_task = asyncio.create_task(_retention_worker())
     yield
     worker.cancel()
+    retention_task.cancel()
     try:
         await worker
+    except asyncio.CancelledError:
+        pass
+    try:
+        await retention_task
     except asyncio.CancelledError:
         pass
 
@@ -2565,6 +2576,42 @@ async def _delete_encode_job_db(job_id: str) -> None:
         await db.commit()
 
 
+def _jobs_to_prune(jobs: dict, now: float, retention_days: float) -> list[str]:
+    """Return ids of finished (done/cancelled/failed) jobs whose finished_at
+    is older than retention_days. retention_days <= 0 disables pruning."""
+    if retention_days <= 0:
+        return []
+    cutoff = now - retention_days * 86400
+    return [
+        jid for jid, job in jobs.items()
+        if job.status in ("done", "cancelled", "failed")
+        and job.finished_at is not None
+        and job.finished_at < cutoff
+    ]
+
+
+async def _prune_old_encode_jobs() -> int:
+    """Delete finished jobs past ENCODE_JOB_RETENTION_DAYS from memory and DB."""
+    ids = _jobs_to_prune(_encode_jobs, time.time(), ENCODE_JOB_RETENTION_DAYS)
+    for jid in ids:
+        _encode_jobs.pop(jid, None)
+        await _delete_encode_job_db(jid)
+    if ids:
+        log.info("Pruned %d encode job(s) older than %s day(s)", len(ids), ENCODE_JOB_RETENTION_DAYS)
+    return len(ids)
+
+
+async def _retention_worker() -> None:
+    """Periodically prune old finished encode jobs for long-running servers
+    that aren't restarted often enough for the startup prune to matter."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            await _prune_old_encode_jobs()
+        except Exception:
+            log.exception("Encode job retention prune failed")
+
+
 async def _load_encode_jobs() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2601,6 +2648,8 @@ async def _load_encode_jobs() -> None:
 
     if rows:
         log.info("Restored %d encode job(s) from DB", len(rows))
+
+    await _prune_old_encode_jobs()
 
 
 def _detect_hw_accel_sync() -> dict:
