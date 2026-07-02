@@ -4160,30 +4160,45 @@ async def _check_free_space(output_dir: Path, sources: list[Path]) -> None:
         )
 
 
+# Fallback values used when a request omits a field entirely — overridable
+# via an encode_defaults: block in config.yaml, e.g. for a user who always
+# encodes to AV1 at qp 22 and doesn't want to re-pick that every time:
+#   encode_defaults:
+#     qp: 22
+#     codec: av1
+_ENCODE_DEFAULTS_CFG: dict = _config.get("encode_defaults") or {}
+
+
+def _encode_default(key: str, fallback):
+    return _ENCODE_DEFAULTS_CFG.get(key, fallback)
+
+
 def _make_encode_config(body: dict) -> dict:
     """Validate and normalise encode config from a request body dict."""
-    fmt = str(body.get("format", "mkv")).lower()
+    fmt = str(body.get("format", _encode_default("format", "mkv"))).lower()
     if fmt not in ("mkv", "mp4"):
         fmt = "mkv"
-    gpu = str(body.get("gpu", "auto"))
+    gpu = str(body.get("gpu", _encode_default("gpu", "auto")))
     if gpu not in ("auto", "intel", "nvidia", "amd", "none"):
         gpu = "auto"
-    preset_val = str(body.get("preset", "quality"))
+    preset_val = str(body.get("preset", _encode_default("preset", "quality")))
     if preset_val not in ("quality", "balanced", "fast", "speed", "archive"):
         preset_val = "quality"
-    codec = str(body.get("codec", "hevc")).lower()
+    codec = str(body.get("codec", _encode_default("codec", "hevc"))).lower()
     if codec not in ("hevc", "h264", "av1"):
         codec = "hevc"
+    denoise_val = body.get("denoise", _encode_default("denoise", None))
+    width_val = body.get("width", _encode_default("width", None))
     return {
-        "qp":      max(1, min(51, int(body.get("qp", 18)))),
+        "qp":      max(1, min(51, int(body.get("qp", _encode_default("qp", 18))))),
         "preset":  preset_val,
         "gpu":     gpu,
         "codec":   codec,
         "format":  fmt,
-        "denoise": body.get("denoise") if body.get("denoise") in ("ultralight", "light", "medium", "strong", "stronger", "verystrong") else None,
-        "crop":    bool(body.get("crop", False)),
-        "width":   int(body["width"]) if body.get("width") else None,
-        "lang":    _validated_lang(body.get("lang", "eng")),
+        "denoise": denoise_val if denoise_val in ("ultralight", "light", "medium", "strong", "stronger", "verystrong") else None,
+        "crop":    bool(body.get("crop", _encode_default("crop", False))),
+        "width":   int(width_val) if width_val else None,
+        "lang":    _validated_lang(body.get("lang", _encode_default("lang", "eng"))),
     }
 
 
