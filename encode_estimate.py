@@ -24,3 +24,17 @@ def parse_ssim(stderr_text: str) -> float | None:
         return float(matches[-1])
     except ValueError:
         return None
+
+
+def build_ssim_ref_filter(crop_filter: str | None, width: int | None) -> str:
+    """Build the ffmpeg -lavfi filter comparing encoded output [0:v] to the
+    raw sample [1:v], applying to the reference the same crop/scale that was
+    applied to the encode so both frames have matching dimensions."""
+    ref_ops = []
+    if crop_filter:
+        ref_ops.append(f"crop={crop_filter}")
+    if width:
+        ref_ops.append(f"scale={int(width)}:-2")
+    if not ref_ops:
+        return "[0:v][1:v]ssim"
+    return f"[1:v]{','.join(ref_ops)}[ref];[0:v][ref]ssim"

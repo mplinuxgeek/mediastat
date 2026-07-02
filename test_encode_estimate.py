@@ -1,6 +1,6 @@
 import unittest
 
-from encode_estimate import sample_window, parse_ssim
+from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter
 
 
 class SampleWindowTests(unittest.TestCase):
@@ -43,6 +43,29 @@ class ParseSsimTests(unittest.TestCase):
 
     def test_returns_none_on_empty_string(self):
         self.assertIsNone(parse_ssim(""))
+
+
+class BuildSsimRefFilterTests(unittest.TestCase):
+    def test_no_crop_no_width_compares_directly(self):
+        self.assertEqual(build_ssim_ref_filter(None, None), "[0:v][1:v]ssim")
+
+    def test_crop_only_applies_crop_to_reference(self):
+        self.assertEqual(
+            build_ssim_ref_filter("1920:800:0:140", None),
+            "[1:v]crop=1920:800:0:140[ref];[0:v][ref]ssim",
+        )
+
+    def test_width_only_applies_scale_to_reference(self):
+        self.assertEqual(
+            build_ssim_ref_filter(None, 1280),
+            "[1:v]scale=1280:-2[ref];[0:v][ref]ssim",
+        )
+
+    def test_crop_and_width_apply_both_in_order(self):
+        self.assertEqual(
+            build_ssim_ref_filter("1920:800:0:140", 1280),
+            "[1:v]crop=1920:800:0:140,scale=1280:-2[ref];[0:v][ref]ssim",
+        )
 
 
 if __name__ == "__main__":
