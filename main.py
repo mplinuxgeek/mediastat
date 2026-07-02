@@ -72,6 +72,14 @@ TMDB_API_KEY: str = (_config.get("tmdb_api_key") or "").strip()
 # Set encode_job_retention_days: 0 (or negative) in config.yaml to disable.
 ENCODE_JOB_RETENTION_DAYS: float = float(_config.get("encode_job_retention_days", 30))
 
+# Optional webhook fired when an encode job finishes or fails, so an
+# overnight batch doesn't require an open browser tab to notice. Set
+# webhook_url in config.yaml to enable; webhook_style shapes the payload
+# for a specific receiver ("generic" JSON, "discord", or "ntfy" — plain
+# text body). Leave webhook_url unset to disable entirely.
+WEBHOOK_URL: str = (_config.get("webhook_url") or "").strip()
+WEBHOOK_STYLE: str = str(_config.get("webhook_style", "generic")).lower()
+
 # Directories listed in config.yaml: [{label, path}, ...]
 CONFIGURED_DIRS: list[dict] = [
     {"label": d.get("label", ""), "path": str(Path(d["path"]).expanduser())}
@@ -3367,6 +3375,42 @@ async def _run_estimate(path: str, config: dict) -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _build_webhook_payload(style: str, event: str, job: "EncodeJob") -> tuple[bytes, dict]:
+    """Return (body_bytes, headers) shaped for the given webhook style."""
+    if event == "done":
+        message = f"✅ Encode finished: {job.input_name}"
+    else:
+        message = f"❌ Encode failed: {job.input_name}" + (f" — {job.error}" if job.error else "")
+
+    if style == "discord":
+        return json.dumps({"content": message}).encode(), {"Content-Type": "application/json"}
+    if style == "ntfy":
+        return message.encode(), {"Title": "mediastat"}
+    # generic
+    body = json.dumps({
+        "event": event, "job_id": job.id,
+        "input_name": job.input_name, "output_name": job.output_name,
+        "error": job.error,
+    }).encode()
+    return body, {"Content-Type": "application/json"}
+
+
+def _post_webhook_sync(url: str, body: bytes, headers: dict) -> None:
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    urllib.request.urlopen(req, timeout=10).close()
+
+
+async def _send_encode_webhook(event: str, job: "EncodeJob") -> None:
+    """Best-effort notification — never lets a webhook failure affect the job."""
+    if not WEBHOOK_URL:
+        return
+    body, headers = _build_webhook_payload(WEBHOOK_STYLE, event, job)
+    try:
+        await asyncio.to_thread(_post_webhook_sync, WEBHOOK_URL, body, headers)
+    except Exception as e:
+        log.warning("Encode webhook notify failed: %s", e)
+
+
 async def _run_encode_job(job_id: str) -> None:
     job = _encode_jobs.get(job_id)
     if not job or job.status == "cancelled":
@@ -3558,6 +3602,8 @@ async def _run_encode_job(job_id: str) -> None:
         if job_id in _encode_jobs:
             _notify_encode(job_id)
             await _save_encode_job(job)
+            if job.status in ("done", "failed"):
+                asyncio.create_task(_send_encode_webhook(job.status, job))
 
 
 def _get_driver_info() -> dict:
