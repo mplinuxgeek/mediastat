@@ -93,10 +93,29 @@ _real_root: Path = Path(os.path.realpath(DEFAULT_ROOT))  # cached realpath, upda
 
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".ts", ".m4v"}
 
-# Concurrency caps
-_PROBE_SEM = asyncio.Semaphore(8)   # max parallel ffprobe processes
-_DU_SEM    = asyncio.Semaphore(8)   # max parallel du processes
-_SCAN_SEM  = asyncio.Semaphore(4)   # max in-flight scan tasks (DB conn + ffprobe)
+# Concurrency caps — overridable via a `concurrency:` block in config.yaml,
+# e.g. to turn these down on a low-power NAS or up on a beefier server:
+#   concurrency:
+#     probe_workers: 8
+#     disk_usage_workers: 8
+#     scan_workers: 4
+#     imdb_search_workers: 32
+#     imdb_match_write_workers: 16
+_CONCURRENCY_CFG: dict = _config.get("concurrency") or {}
+
+
+def _concurrency(key: str, default: int) -> int:
+    try:
+        return max(1, int(_CONCURRENCY_CFG.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_PROBE_SEM = asyncio.Semaphore(_concurrency("probe_workers", 8))   # max parallel ffprobe processes
+_DU_SEM    = asyncio.Semaphore(_concurrency("disk_usage_workers", 8))   # max parallel du processes
+_SCAN_SEM  = asyncio.Semaphore(_concurrency("scan_workers", 4))   # max in-flight scan tasks (DB conn + ffprobe)
+IMDB_SEARCH_WORKERS = _concurrency("imdb_search_workers", 32)
+IMDB_MATCH_WRITE_WORKERS = _concurrency("imdb_match_write_workers", 16)
 
 # In-process TTL cache for directory sizes  {path_str: (size_bytes, timestamp)}
 _dir_size_cache: dict[str, tuple[int, float]] = {}
@@ -369,7 +388,7 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
         _imdbscan_progress["phase"] = "searching"
         search_results: list[tuple] = [None] * total
         futures = {}
-        with ThreadPoolExecutor(max_workers=32) as ex:
+        with ThreadPoolExecutor(max_workers=IMDB_SEARCH_WORKERS) as ex:
             for i, fpath in enumerate(paths):
                 futures[ex.submit(_search_path, fpath)] = i
             for fut in as_completed(futures):
@@ -426,7 +445,7 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
             finally:
                 c.close()
 
-        with ThreadPoolExecutor(max_workers=16) as ex:
+        with ThreadPoolExecutor(max_workers=IMDB_MATCH_WRITE_WORKERS) as ex:
             futs = {ex.submit(_write_match, fpath, r): fpath for fpath, r in auto_items}
             for fut in as_completed(futs):
                 try:
