@@ -3898,12 +3898,15 @@ async def encode_events(request: Request):
 async def start_estimate(request: Request, path: str = Query(...)):
     if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
-    if _estimate_state.get("status") in ("probing", "extracting", "encoding"):
+    if _estimate_state.get("status") in ("starting", "probing", "extracting", "encoding"):
         raise HTTPException(status_code=409, detail="An estimate is already running")
+    _estimate_state["status"] = "starting"
     file_path = safe_path(path)
     if not file_path.is_file():
+        _estimate_state["status"] = "idle"
         raise HTTPException(status_code=404, detail="File not found")
     if not shutil.which("ffmpeg"):
+        _estimate_state["status"] = "idle"
         raise HTTPException(status_code=400, detail="ffmpeg not found in PATH")
     try:
         body = await request.json()

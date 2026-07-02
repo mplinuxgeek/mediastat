@@ -119,5 +119,77 @@ class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(main._estimate_state["error"])
 
 
+class _FakeRequest:
+    """Minimal stand-in for fastapi.Request exposing only what start_estimate reads."""
+
+    def __init__(self, headers=None, body=None):
+        self._headers = headers or {}
+        self._body = body or {}
+
+    @property
+    def headers(self):
+        return self._headers
+
+    async def json(self):
+        return self._body
+
+
+class StartEstimateLockTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # Reset global state before each test so tests don't leak into each other.
+        main._estimate_state = {"status": "idle", "results": [], "suggested_qp": None,
+                                 "warning": None, "error": None, "current_qp": None}
+
+    async def test_second_call_while_starting_is_rejected(self):
+        """
+        Simulates the TOCTOU race: the first call must mark the estimate as
+        busy (status="starting") synchronously, before its first `await`, so
+        that a second concurrent call - which runs interleaved on the event
+        loop before the first call's asyncio.create_task actually executes -
+        sees the busy status and is rejected with 409, instead of also
+        passing the check and kicking off a second concurrent _run_estimate.
+        """
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+
+        # shutil.which returns None so the handler raises before ever
+        # awaiting request.json(), letting us observe the busy marker was set
+        # purely by synchronous code before that first await point.
+        with unittest.mock.patch.object(main, "safe_path", return_value=main.Path(__file__)), \
+             unittest.mock.patch("main.shutil.which", return_value=None):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.start_estimate(_FakeRequest(headers=headers), path="does-not-exist.mkv")
+            self.assertEqual(ctx.exception.status_code, 400)
+            # The handler must have reset status back to idle after bailing
+            # out on the ffmpeg-not-found error, so the lock isn't stuck.
+            self.assertEqual(main._estimate_state["status"], "idle")
+
+    async def test_concurrent_second_request_gets_409(self):
+        """
+        End-to-end race check: fire two start_estimate calls back-to-back
+        without letting _run_estimate actually run. Because the lock is set
+        synchronously before any await, the second call must observe
+        status == "starting" and be rejected with 409, even though
+        _run_estimate (which would set status="probing") never got a chance
+        to run.
+        """
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+
+        async def _fake_run_estimate(path, config):
+            # Never actually runs in this test because we don't yield control
+            # back to the event loop before issuing the second request.
+            pass
+
+        with unittest.mock.patch.object(main, "safe_path", return_value=main.Path(__file__)), \
+             unittest.mock.patch.object(main.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             unittest.mock.patch.object(main, "_run_estimate", side_effect=_fake_run_estimate):
+            result = await main.start_estimate(_FakeRequest(headers=headers), path="a.mkv")
+            self.assertEqual(result, {"status": "started"})
+            self.assertEqual(main._estimate_state["status"], "starting")
+
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.start_estimate(_FakeRequest(headers=headers), path="a.mkv")
+            self.assertEqual(ctx.exception.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main()
