@@ -163,16 +163,43 @@ class StartEstimateLockTests(unittest.IsolatedAsyncioTestCase):
             # out on the ffmpeg-not-found error, so the lock isn't stuck.
             self.assertEqual(main._estimate_state["status"], "idle")
 
-    async def test_concurrent_second_request_gets_409(self):
+    async def test_lock_is_set_before_first_await(self):
         """
-        End-to-end race check: fire two start_estimate calls back-to-back
-        without letting _run_estimate actually run. Because the lock is set
-        synchronously before any await, the second call must observe
-        status == "starting" and be rejected with 409, even though
-        _run_estimate (which would set status="probing") never got a chance
-        to run.
+        Proves the actual atomicity property claimed by the fix: the
+        busy-check and the status="starting" write happen with zero
+        `await` between them, so status is already "starting" by the
+        time start_estimate reaches its first real await point
+        (`await request.json()`).
+
+        This is checked directly rather than by simulating scheduling:
+        the fake request's json() method asserts the status has already
+        flipped to "starting" *before* it returns control. If the set
+        were (incorrectly) moved after an await, this assertion would
+        not yet hold when json() is awaited, and the test would fail -
+        which is precisely the bug class the earlier TOCTOU race allowed
+        (a second concurrent caller slipping in between the check and
+        the set).
+
+        A trailing sequential 409 check is retained to confirm the lock
+        is actually observed as busy by a subsequent caller, but note
+        that check alone is a weaker guarantee than the assertion above
+        since it only proves ordering after the first call has fully
+        returned.
         """
         headers = {"X-Delete-Token": main.DELETE_TOKEN}
+
+        class _AssertingRequest(_FakeRequest):
+            async def json(self):
+                # By the time start_estimate awaits request.json(), the
+                # busy-check-and-set must already have completed
+                # synchronously - proving no await point exists between
+                # them where a concurrent call could race in.
+                assert main._estimate_state["status"] == "starting", (
+                    "status must already be 'starting' before the first "
+                    "await in start_estimate, otherwise a concurrent "
+                    "caller could slip between the check and the set"
+                )
+                return await super().json()
 
         async def _fake_run_estimate(path, config):
             # Never actually runs in this test because we don't yield control
@@ -182,7 +209,7 @@ class StartEstimateLockTests(unittest.IsolatedAsyncioTestCase):
         with unittest.mock.patch.object(main, "safe_path", return_value=main.Path(__file__)), \
              unittest.mock.patch.object(main.shutil, "which", return_value="/usr/bin/ffmpeg"), \
              unittest.mock.patch.object(main, "_run_estimate", side_effect=_fake_run_estimate):
-            result = await main.start_estimate(_FakeRequest(headers=headers), path="a.mkv")
+            result = await main.start_estimate(_AssertingRequest(headers=headers), path="a.mkv")
             self.assertEqual(result, {"status": "started"})
             self.assertEqual(main._estimate_state["status"], "starting")
 
