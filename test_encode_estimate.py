@@ -1,6 +1,6 @@
 import unittest
 
-from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter
+from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter, suggest_qp
 
 
 class SampleWindowTests(unittest.TestCase):
@@ -66,6 +66,41 @@ class BuildSsimRefFilterTests(unittest.TestCase):
             build_ssim_ref_filter("1920:800:0:140", 1280),
             "[1:v]crop=1920:800:0:140,scale=1280:-2[ref];[0:v][ref]ssim",
         )
+
+
+class SuggestQpTests(unittest.TestCase):
+    def test_picks_highest_qp_meeting_threshold(self):
+        results = [
+            {"qp": 16, "ssim": 0.995},
+            {"qp": 18, "ssim": 0.990},
+            {"qp": 20, "ssim": 0.981},
+            {"qp": 22, "ssim": 0.960},
+        ]
+        qp, warning = suggest_qp(results, threshold=0.98)
+        self.assertEqual(qp, 20)
+        self.assertIsNone(warning)
+
+    def test_falls_back_to_lowest_qp_with_warning_when_none_meet_threshold(self):
+        results = [
+            {"qp": 16, "ssim": 0.970},
+            {"qp": 18, "ssim": 0.950},
+            {"qp": 20, "ssim": 0.930},
+            {"qp": 22, "ssim": 0.900},
+        ]
+        qp, warning = suggest_qp(results, threshold=0.98)
+        self.assertEqual(qp, 16)
+        self.assertIsNotNone(warning)
+        self.assertIn("QP16", warning)
+
+    def test_treats_missing_ssim_as_not_qualifying(self):
+        results = [
+            {"qp": 16, "ssim": None},
+            {"qp": 18, "ssim": 0.99},
+            {"qp": 20, "ssim": None},
+        ]
+        qp, warning = suggest_qp(results, threshold=0.98)
+        self.assertEqual(qp, 18)
+        self.assertIsNone(warning)
 
 
 if __name__ == "__main__":

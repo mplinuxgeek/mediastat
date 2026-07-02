@@ -38,3 +38,17 @@ def build_ssim_ref_filter(crop_filter: str | None, width: int | None) -> str:
     if not ref_ops:
         return "[0:v][1:v]ssim"
     return f"[1:v]{','.join(ref_ops)}[ref];[0:v][ref]ssim"
+
+
+def suggest_qp(results: list[dict], threshold: float = 0.98) -> tuple[int, str | None]:
+    """Pick the highest tested QP whose SSIM meets `threshold` (most
+    compression while staying near-lossless). Falls back to the lowest
+    tested QP with a warning if none qualify."""
+    passing = [r for r in results if r.get("ssim") is not None and r["ssim"] >= threshold]
+    if passing:
+        return max(passing, key=lambda r: r["qp"])["qp"], None
+    lowest = min(results, key=lambda r: r["qp"])
+    return lowest["qp"], (
+        f"even QP{lowest['qp']} SSIM ({lowest.get('ssim')}) is below the "
+        f"{threshold} target — this content may compress poorly, or check source quality"
+    )
