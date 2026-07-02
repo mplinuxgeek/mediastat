@@ -82,6 +82,27 @@ class ProbeVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(info["ok"])
 
 
+class _EmptyAsyncIter:
+    """Stand-in for an empty stderr stream (`async for raw in proc.stderr`)."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+class _FakeProgressStdout:
+    """Stand-in for proc.stdout when reading -progress pipe:1 output: yields
+    one progress chunk then EOF, matching the real read(n) loop's shape."""
+
+    def __init__(self, payload: bytes):
+        self._chunks = [payload, b""]
+
+    async def read(self, n):
+        return self._chunks.pop(0) if self._chunks else b""
+
+
 class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_sweep_reports_four_results_and_suggestion(self):
         calls = []
@@ -97,7 +118,15 @@ class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
                 proc.communicate = unittest.mock.AsyncMock(
                     return_value=(b"", b"SSIM Y:0.99 U:0.99 V:0.99 All:0.990000 (20.0)\n"))
                 proc.returncode = 0
-            else:  # sample extraction or qp encode
+            elif "-progress" in argv:  # qp encode — reads structured progress from stdout
+                out_path = argv[-1]
+                with open(out_path, "wb") as f:
+                    f.write(b"0" * 1000)
+                proc.stdout = _FakeProgressStdout(b"out_time_us=60000000\nfps=25.0\nprogress=end\n")
+                proc.stderr = _EmptyAsyncIter()
+                proc.wait = unittest.mock.AsyncMock(return_value=0)
+                proc.returncode = 0
+            else:  # sample extraction (stream copy, stdout=DEVNULL, uses communicate)
                 out_path = argv[-1]
                 with open(out_path, "wb") as f:
                     f.write(b"0" * 1000)
@@ -113,10 +142,17 @@ class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
             await main._run_estimate("/tmp/does-not-exist.mkv", main._make_encode_config({}))
 
         self.assertEqual(main._estimate_state["status"], "done")
-        self.assertEqual(len(main._estimate_state["results"]), 4)
-        self.assertEqual([r["qp"] for r in main._estimate_state["results"]], [16, 18, 20, 22])
-        self.assertEqual(main._estimate_state["suggested_qp"], 22)
+        self.assertEqual(len(main._estimate_state["results"]), 9)
+        self.assertEqual([r["qp"] for r in main._estimate_state["results"]], list(range(16, 25)))
+        self.assertEqual(main._estimate_state["suggested_qp"], 24)
         self.assertIsNone(main._estimate_state["error"])
+
+        # Completing an estimate also stashes it in per-file history, so a
+        # later estimate for a different file won't clobber this one's result.
+        cached = main._estimate_history.get("/tmp/does-not-exist.mkv")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["status"], "done")
+        self.assertEqual(cached["suggested_qp"], 24)
 
 
 class _FakeRequest:

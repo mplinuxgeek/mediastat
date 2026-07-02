@@ -154,16 +154,17 @@
                 <span></span>
             </div>
             <div id="estimate-panel" style="display:none;margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:6px">
-                <div style="font-size:var(--fs-sm);color:var(--muted);margin-bottom:8px">Sampling 60s from the middle of the file…</div>
+                <div id="estimate-status-line" style="font-size:var(--fs-sm);color:var(--muted);margin-bottom:8px">Sampling 60s from the middle of the file…</div>
                 <table style="width:100%;border-collapse:collapse;font-size:var(--fs-sm)">
                     <thead>
                         <tr style="text-align:left;color:var(--muted)">
                             <th style="padding:4px">QP</th>
                             <th style="padding:4px">Size</th>
                             <th style="padding:4px">% of raw</th>
-                            <th style="padding:4px">SSIM</th>
+                            <th style="padding:4px;cursor:help" title="Structural Similarity Index — compares the encoded sample to the original frame-by-frame. 1.0 = pixel-identical. Above ~0.98 is generally considered visually lossless; lower values mean more visible quality loss.">SSIM ⓘ</th>
                             <th style="padding:4px">Time</th>
                             <th style="padding:4px">Est. full file</th>
+                            <th style="padding:4px"></th>
                         </tr>
                     </thead>
                     <tbody id="estimate-rows"></tbody>

@@ -1,5 +1,6 @@
 import os
 import re
+import copy
 import json
 import shutil
 import logging
@@ -12,6 +13,7 @@ import time
 import platform
 import datetime
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from pathlib import Path
 import urllib.request
 from urllib.parse import quote, urlencode
@@ -3172,6 +3174,22 @@ _estimate_state: dict = {"status": "idle", "results": [], "suggested_qp": None,
                           "warning": None, "error": None, "current_qp": None}
 _estimate_subscribers: list[asyncio.Queue] = []
 
+# Small per-file ring buffer of completed estimates, so estimating file B
+# doesn't erase file A's still-relevant results — only _estimate_state (the
+# single "live" in-progress run) is shared/overwritten across files.
+_ESTIMATE_HISTORY_MAX = 5
+_estimate_history: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _save_estimate_history(history: "OrderedDict[str, dict]", path: str, state: dict, max_size: int) -> None:
+    """Record a completed estimate's final state for `path`, evicting the
+    oldest entry if the history is over max_size. Stores a deep copy so
+    later mutation of the live estimate state can't leak into history."""
+    history[path] = copy.deepcopy(state)
+    history.move_to_end(path)
+    while len(history) > max_size:
+        history.popitem(last=False)
+
 
 def _broadcast_estimate() -> None:
     msg = json.dumps({"type": "state", "state": _estimate_state})
@@ -3318,10 +3336,12 @@ async def _run_estimate(path: str, config: dict) -> None:
         _estimate_state["suggested_qp"] = suggested_qp
         _estimate_state["warning"] = warning
         _broadcast_estimate()
+        _save_estimate_history(_estimate_history, path, _estimate_state, _ESTIMATE_HISTORY_MAX)
     except Exception as e:
         _estimate_state["status"] = "error"
         _estimate_state["error"] = str(e)
         _broadcast_estimate()
+        _save_estimate_history(_estimate_history, path, _estimate_state, _ESTIMATE_HISTORY_MAX)
         log.warning("Estimate failed: %s", e)
     finally:
         if tmp_dir:
@@ -4005,6 +4025,16 @@ async def start_estimate(request: Request, path: str = Query(...)):
     config = _make_encode_config({**body, "qp": 18})
     asyncio.create_task(_run_estimate(str(file_path), config))
     return {"status": "started"}
+
+
+@app.get("/encode/estimate/history")
+async def estimate_history(path: str = Query(...)):
+    """Return the last completed estimate for `path`, if one is cached."""
+    file_path = safe_path(path)
+    state = _estimate_history.get(str(file_path))
+    if state is None:
+        raise HTTPException(status_code=404, detail="No cached estimate for this file")
+    return state
 
 
 @app.get("/encode/estimate/events")

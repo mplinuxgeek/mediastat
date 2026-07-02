@@ -47,6 +47,28 @@
         document.getElementById('encode-file-path').value = path;
         applyEncodePreset('quality');
         document.getElementById('encode-modal').style.display = 'flex';
+        _loadCachedEstimate(path);
+    }
+
+    // Show a previous estimate for this exact file, if one is cached
+    // server-side, instead of always starting blank — each file keeps its
+    // own last result, so switching files never loses another file's numbers.
+    async function _loadCachedEstimate(path) {
+        const panel = document.getElementById('estimate-panel');
+        panel.style.display = 'none';
+        document.getElementById('estimate-rows').innerHTML = '';
+        document.getElementById('estimate-summary').innerHTML = '';
+        try {
+            const resp = await fetch('/encode/estimate/history?path=' + encodeURIComponent(path));
+            if (!resp.ok) return;
+            const state = await resp.json();
+            document.getElementById('estimate-status-line').textContent =
+                'Showing a previous estimate for this file — click Estimate to re-run.';
+            panel.style.display = 'block';
+            _renderEstimateState(state);
+        } catch (e) {
+            // No cached estimate for this file — leave the panel hidden.
+        }
     }
     function closeEncodeModal() {
         document.getElementById('encode-modal').style.display = 'none';
@@ -104,6 +126,8 @@
     }
 
     // ── QP estimate ──────────────────────────────────────────────
+    // Must match _ESTIMATE_QPS in main.py.
+    const _ESTIMATE_QPS = [16, 17, 18, 19, 20, 21, 22, 23, 24];
     let _estimateSource = null;
 
     function _fmtBytes(n) {
@@ -115,29 +139,44 @@
     }
 
     function _renderEstimateState(state) {
-        const rows = state.results.map(r => `
-            <tr data-qp="${r.qp}" style="${state.suggested_qp === r.qp ? 'font-weight:600' : ''}">
-                <td style="padding:4px">${r.qp}</td>
+        const rows = state.results.map(r => {
+            const recommended = state.suggested_qp === r.qp;
+            return `
+            <tr data-qp="${r.qp}" style="${recommended ? 'font-weight:600;background:color-mix(in srgb, var(--accent) 12%, transparent)' : ''}">
+                <td style="padding:4px">${r.qp}${recommended ? ' ★' : ''}</td>
                 <td style="padding:4px">${_fmtBytes(r.bytes)}</td>
                 <td style="padding:4px">${r.pct_of_sample != null ? r.pct_of_sample + '%' : '—'}</td>
                 <td style="padding:4px">${r.ssim != null ? r.ssim.toFixed(4) : '—'}</td>
                 <td style="padding:4px">${r.seconds}s</td>
                 <td style="padding:4px">${_fmtBytes(r.estimated_full_bytes)}</td>
-            </tr>`).join('');
-        const pending = [16, 18, 20, 22].filter(qp => !state.results.some(r => r.qp === qp));
-        const pendingRows = pending.map(qp => `
+                <td style="padding:4px"><button class="btn ${recommended ? 'btn-primary' : ''}" style="padding:2px 8px;font-size:var(--fs-xs)" onclick="_useEstimatedQp(${r.qp})">Use</button></td>
+            </tr>`;
+        }).join('');
+        const pending = _ESTIMATE_QPS.filter(qp => !state.results.some(r => r.qp === qp));
+        const pendingRows = pending.map(qp => {
+            const active = state.current_qp === qp && state.status === 'encoding';
+            const pct = active ? Math.max(0, Math.min(99, state.qp_progress || 0)) : 0;
+            const cell = active
+                ? `<div style="display:flex;align-items:center;gap:8px">
+                       <div style="flex:1;height:6px;border-radius:3px;background:var(--border);overflow:hidden">
+                           <div style="width:${pct}%;height:100%;background:var(--accent);transition:width 0.4s linear"></div>
+                       </div>
+                       <span style="font-size:var(--fs-xs);color:var(--muted);min-width:3em;text-align:right">${pct.toFixed(0)}%</span>
+                   </div>`
+                : 'pending…';
+            return `
             <tr data-qp="${qp}" style="color:var(--muted)">
                 <td style="padding:4px">${qp}</td>
-                <td colspan="5" style="padding:4px">${state.current_qp === qp ? 'encoding…' : 'pending…'}</td>
-            </tr>`).join('');
+                <td colspan="6" style="padding:4px">${cell}</td>
+            </tr>`;
+        }).join('');
         document.getElementById('estimate-rows').innerHTML = rows + pendingRows;
 
         const summary = document.getElementById('estimate-summary');
         if (state.status === 'error') {
             summary.innerHTML = `<span style="color:var(--danger,#c0392b)">Estimate failed: ${escHtml(state.error || 'unknown error')}</span>`;
         } else if (state.status === 'done') {
-            let html = `<span>Suggested: <strong>QP ${state.suggested_qp}</strong></span>
-                <button class="btn btn-primary" style="padding:4px 10px;font-size:var(--fs-sm)" onclick="_useEstimatedQp(${state.suggested_qp})">Use QP ${state.suggested_qp}</button>`;
+            let html = `<span>Suggested: <strong>QP ${state.suggested_qp}</strong> ★</span>`;
             if (state.warning) html += `<span style="color:var(--muted);font-size:var(--fs-xs)">${escHtml(state.warning)}</span>`;
             summary.innerHTML = html;
         } else {
@@ -151,6 +190,7 @@
         const btn = document.getElementById('estimate-btn');
         btn.disabled = true;
         document.getElementById('estimate-panel').style.display = 'block';
+        document.getElementById('estimate-status-line').textContent = 'Sampling 60s from the middle of the file…';
         document.getElementById('estimate-rows').innerHTML = '';
         document.getElementById('estimate-summary').innerHTML = '';
 
@@ -1517,11 +1557,23 @@
                 b.classList.toggle('active', b.dataset.sort === sort);
             });
             _sortDir = params.get('dir') || (_sortDefaults[sort] ?? 'asc');
+            _applySort(sort);
         }
         _refreshSortArrows();
     }
 
     restoreFromUrl();
+
+    // The file/dir listing loads asynchronously via htmx (hx-trigger="load"
+    // on the root container, "toggle once" for lazily-expanded subdirs), so
+    // at the point restoreFromUrl() runs there's nothing in the DOM yet to
+    // sort. Re-apply whatever sort is currently active every time htmx swaps
+    // in new listing content, so both the initial load and later-expanded
+    // subdirectories end up in the URL-restored (or last clicked) order.
+    document.body.addEventListener('htmx:afterSwap', () => {
+        const activeBtn = document.querySelector('#global-sort-bar .sort-btn.active');
+        if (activeBtn) _applySort(activeBtn.dataset.sort);
+    });
 
     // Kick off scans/checks for placeholders on initial page load
     document.querySelectorAll('.files-scanning').forEach(startFileScan);
@@ -1712,10 +1764,7 @@
         });
     }
 
-    function sortAll(btn) {
-        const key = btn.dataset.sort;
-        const wasActive = btn.classList.contains('active');
-        _sortDir = wasActive ? (_sortDir === 'asc' ? 'desc' : 'asc') : (_sortDefaults[key] ?? 'asc');
+    function _applySort(key) {
         const reorder = (container, selector) => {
             const els = [...container.querySelectorAll(selector)];
             els.sort((a, b) => {
@@ -1734,6 +1783,13 @@
             const ft = block.querySelector('.files-table');
             if (ft) reorder(ft, ':scope > .file-entry');
         });
+    }
+
+    function sortAll(btn) {
+        const key = btn.dataset.sort;
+        const wasActive = btn.classList.contains('active');
+        _sortDir = wasActive ? (_sortDir === 'asc' ? 'desc' : 'asc') : (_sortDefaults[key] ?? 'asc');
+        _applySort(key);
         document.querySelectorAll('#global-sort-bar .sort-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         _refreshSortArrows();
