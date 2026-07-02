@@ -163,6 +163,36 @@ class StartEstimateLockTests(unittest.IsolatedAsyncioTestCase):
             # out on the ffmpeg-not-found error, so the lock isn't stuck.
             self.assertEqual(main._estimate_state["status"], "idle")
 
+    async def test_safe_path_rejection_does_not_wedge_lock(self):
+        """
+        safe_path() is called before the busy-check/lock-claim. If it raises
+        HTTPException(403) (e.g. path traversal outside the media root), no
+        lock should ever have been claimed, so a subsequent legitimate call
+        must not be incorrectly rejected with 409.
+        """
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+
+        with unittest.mock.patch.object(
+            main, "safe_path",
+            side_effect=main.HTTPException(status_code=403, detail="Access denied"),
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.start_estimate(_FakeRequest(headers=headers), path="../../etc/passwd")
+            self.assertEqual(ctx.exception.status_code, 403)
+
+        # The lock must not have been claimed by the rejected call.
+        self.assertEqual(main._estimate_state["status"], "idle")
+
+        # A subsequent legitimate call must succeed, not be rejected with 409.
+        async def _fake_run_estimate(path, config):
+            pass
+
+        with unittest.mock.patch.object(main, "safe_path", return_value=main.Path(__file__)), \
+             unittest.mock.patch.object(main.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             unittest.mock.patch.object(main, "_run_estimate", side_effect=_fake_run_estimate):
+            result = await main.start_estimate(_FakeRequest(headers=headers), path="a.mkv")
+            self.assertEqual(result, {"status": "started"})
+
     async def test_lock_is_set_before_first_await(self):
         """
         Proves the actual atomicity property claimed by the fix: the
