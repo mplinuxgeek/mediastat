@@ -99,6 +99,43 @@
         _renderCustomPresetButtons();
     }
 
+    // ── Per-folder default encode settings (localStorage, remembers the
+    // last settings used for a given folder instead of always resetting to
+    // the quality preset) ──────────────────────────────────────────────
+    const _FOLDER_DEFAULTS_KEY = 'mediastat_folder_encode_defaults';
+
+    function _loadFolderDefaults() {
+        try {
+            const raw = localStorage.getItem(_FOLDER_DEFAULTS_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function _saveFolderDefault(folderPath, config) {
+        try {
+            const all = _loadFolderDefaults();
+            all[folderPath] = config;
+            localStorage.setItem(_FOLDER_DEFAULTS_KEY, JSON.stringify(all));
+        } catch (e) { /* localStorage unavailable — just skip remembering */ }
+    }
+
+    function _applyFolderDefault(folderPath) {
+        const saved = _loadFolderDefaults()[folderPath];
+        if (!saved) return false;
+        document.getElementById('enc-qp').value      = saved.qp;
+        document.getElementById('enc-preset').value  = saved.preset;
+        document.getElementById('enc-codec').value   = saved.codec;
+        document.getElementById('enc-gpu').value     = saved.gpu;
+        document.getElementById('enc-format').value  = saved.format;
+        document.getElementById('enc-denoise').value = saved.denoise || '';
+        document.getElementById('enc-crop').checked  = !!saved.crop;
+        document.getElementById('enc-lang').value    = saved.lang || 'eng';
+        document.getElementById('enc-width').value   = saved.width || '';
+        return true;
+    }
+
     function openEncodeModal(btn) {
         const entry = btn.closest('.file-entry');
         const path  = entry.dataset.path;
@@ -561,6 +598,7 @@
         document.getElementById('encode-file-path').value = '';
         _renderCustomPresetButtons();
         applyEncodePreset('quality');
+        _applyFolderDefault(rawPath);  // override the preset if this folder has remembered settings
         modal.style.display = 'flex';
         const confirmBtn = modal.querySelector('.btn-primary');
         confirmBtn._originalOnclick = confirmBtn.onclick;
@@ -586,6 +624,7 @@
                 });
                 if (!resp.ok) throw new Error(await resp.text());
                 const data = await resp.json();
+                _saveFolderDefault(_folderEncodePath, config);
                 closeEncodeModal();
                 showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 7000);
             } catch (e) {
