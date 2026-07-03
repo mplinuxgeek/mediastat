@@ -264,10 +264,14 @@ async function startScan() {
 }
 
 function stopScan() {
-    if (_scanEs) { _scanEs.close(); _scanEs = null; }
-    _running = false;
-    document.getElementById('run-btn').style.display  = '';
-    document.getElementById('stop-btn').style.display = 'none';
+    // Ask the scan itself to stop, not just detach the progress stream —
+    // it used to only close the SSE connection while the scan kept running
+    // server-side regardless of clicking Stop.
+    fetch(BASE_PATH + '/imdb/scan-cancel', {
+        method: 'POST', headers: { 'X-Delete-Token': DELETE_TOKEN },
+    });
+    document.getElementById('stop-btn').disabled = true;
+    document.getElementById('stop-btn').textContent = '⏳ Stopping…';
 }
 
 function listenScan() {
@@ -278,8 +282,13 @@ function listenScan() {
         if (p.phase === 'done') {
             _scanEs.close(); _scanEs = null;
             loadReview();
-        } else if (p.phase === 'error') {
+        } else if (p.phase === 'error' || p.phase === 'cancelled') {
             _scanEs.close(); _scanEs = null;
+            _running = false;
+            document.getElementById('run-btn').style.display  = '';
+            document.getElementById('stop-btn').style.display = 'none';
+            document.getElementById('stop-btn').disabled = false;
+            document.getElementById('stop-btn').textContent = '■ Stop';
         }
     };
 }

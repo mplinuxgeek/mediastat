@@ -227,6 +227,7 @@
             </div>
             <div class="db-actions">
                 <button class="btn" id="dbclean-btn" onclick="startDbClean()">⌫ Clean orphans</button>
+                <button class="btn" id="dbclean-cancel-btn" onclick="cancelDbClean()" style="display:none">✕ Cancel</button>
             </div>
         </div>
 
@@ -535,6 +536,9 @@ function _applyDbCleanProgress(p) {
     } else if (p.phase === 'error') {
         fill.style.background = 'var(--red)';
         msgEl.textContent = 'Error: ' + (p.error || '?');
+    } else if (p.phase === 'cancelled') {
+        fill.style.background = '';
+        msgEl.textContent = `Cancelled at ${p.checked} / ${p.total} — no changes made`;
     } else if (running) {
         fill.style.background = '';
         msgEl.textContent = `Checking ${p.checked} / ${p.total}…`;
@@ -542,6 +546,7 @@ function _applyDbCleanProgress(p) {
 
     btn.disabled = running;
     btn.textContent = running ? '⏳ Checking…' : '⌫ Clean orphans';
+    document.getElementById('dbclean-cancel-btn').style.display = running ? '' : 'none';
 }
 
 async function startDbClean() {
@@ -553,10 +558,14 @@ async function startDbClean() {
     _dbCleanEs.onmessage = e => {
         const p = JSON.parse(e.data);
         _applyDbCleanProgress(p);
-        if (p.phase === 'done' || p.phase === 'error') {
+        if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
             _dbCleanEs.close(); _dbCleanEs = null;
         }
     };
+}
+
+function cancelDbClean() {
+    fetch('/db/clean-cancel', { method: 'POST' });
 }
 
 (async () => {

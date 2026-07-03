@@ -289,6 +289,7 @@
             <div class="schedule-row">
                 <span class="schedule-label">Action</span>
                 <button class="job-action-btn" id="setdates-btn" onclick="startSetDates()">▶ Run</button>
+                <button class="job-action-btn" id="setdates-cancel-btn" onclick="cancelSetDates()" style="display:none">✕ Cancel</button>
                 <span style="font-size:var(--fs-xs);color:var(--muted);margin-left:10px">Sets each matched file's mtime to its IMDb release date. Skips files already set correctly.</span>
             </div>
             <div id="setdates-progress" class="setdates-progress" style="display:none">
@@ -815,6 +816,9 @@ function _applySetDatesProgress(p) {
     } else if (p.phase === 'error') {
         summary.textContent = 'error: ' + (p.error || '?');
         summary.style.color = 'var(--red)';
+    } else if (p.phase === 'cancelled') {
+        summary.textContent = `cancelled at ${p.done} / ${p.total}`;
+        summary.style.color = 'var(--muted)';
     } else if (running) {
         summary.textContent = pct + '%';
         summary.style.color = 'var(--muted)';
@@ -824,6 +828,7 @@ function _applySetDatesProgress(p) {
 
     btn.disabled = running;
     btn.textContent = running ? '⏳ Running…' : '▶ Run';
+    document.getElementById('setdates-cancel-btn').style.display = running ? '' : 'none';
 }
 
 function startSetDates() {
@@ -833,13 +838,17 @@ function startSetDates() {
         .then(j => { if (!j.error) listenSetDates(); });
 }
 
+function cancelSetDates() {
+    fetch('/imdb/set-dates-cancel', { method: 'POST', headers: { 'X-Delete-Token': DELETE_TOKEN } });
+}
+
 function listenSetDates() {
     if (_setDatesEs) _setDatesEs.close();
     _setDatesEs = new EventSource(BASE_PATH + '/imdb/set-dates-progress');
     _setDatesEs.onmessage = e => {
         const p = JSON.parse(e.data);
         _applySetDatesProgress(p);
-        if (p.phase === 'done' || p.phase === 'error') {
+        if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
             _setDatesEs.close(); _setDatesEs = null;
         }
     };
