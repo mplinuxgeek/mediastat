@@ -9,6 +9,7 @@ import math
 import secrets
 import subprocess
 import tempfile
+import threading
 import time
 import platform
 import datetime
@@ -350,10 +351,15 @@ def _pick_auto_candidate(results: list[dict], parsed: dict) -> Optional[dict]:
     return None
 
 
+_imdbscan_cancel_event = threading.Event()
+
+
 def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
     global _imdbscan_progress
+    _imdbscan_cancel_event.clear()
     _imdbscan_progress = {"phase": "running", "searched": 0, "total": 0,
                           "auto": 0, "skipped": 0, "none": 0, "review": []}
+    cancelled = False
     try:
         import sqlite3 as _sq3
         app_conn  = _sq3.connect(DB_PATH)
@@ -400,6 +406,10 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
             for i, fpath in enumerate(paths):
                 futures[ex.submit(_search_path, fpath)] = i
             for fut in as_completed(futures):
+                if _imdbscan_cancel_event.is_set():
+                    cancelled = True
+                    ex.shutdown(cancel_futures=True)
+                    break
                 i = futures[fut]
                 try:
                     search_results[i] = fut.result()
@@ -408,35 +418,39 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
                 _imdbscan_progress["searched"] += 1
 
         # Phase 2: auto-match unambiguous hits, collect review list
-        _imdbscan_progress["phase"] = "matching"
         auto_items  = []
         review_items = []
 
-        for fpath, parsed, results in search_results:
-            if fpath is None:
-                continue
-            if not results:
-                _imdbscan_progress["none"] += 1
-                continue
-            candidate = _pick_auto_candidate(results, parsed)
-            if candidate:
-                auto_items.append((fpath, candidate))
-            elif skip_manual:
-                _imdbscan_progress["skipped"] += 1
-            else:
-                q_norm = _norm_title(parsed.get("searchTitle") or parsed["title"])
-                year   = parsed.get("year")
-                exact  = [r for r in results if
-                          (_norm_title(r["primary_title"]) == q_norm or
-                           (r["original_title"] and _norm_title(r["original_title"]) == q_norm)) and
-                          (not year or r["start_year"] == year)]
-                review_items.append({
-                    "path": fpath,
-                    "filename": Path(fpath).name,
-                    "reason": f"{len(exact)} exact matches" if len(exact) > 1
-                              else ("no year in filename" if not year else "no exact match"),
-                    "results": (exact if exact else results)[:8],
-                })
+        if not cancelled:
+            _imdbscan_progress["phase"] = "matching"
+            for fpath, parsed, results in search_results:
+                if _imdbscan_cancel_event.is_set():
+                    cancelled = True
+                    break
+                if fpath is None:
+                    continue
+                if not results:
+                    _imdbscan_progress["none"] += 1
+                    continue
+                candidate = _pick_auto_candidate(results, parsed)
+                if candidate:
+                    auto_items.append((fpath, candidate))
+                elif skip_manual:
+                    _imdbscan_progress["skipped"] += 1
+                else:
+                    q_norm = _norm_title(parsed.get("searchTitle") or parsed["title"])
+                    year   = parsed.get("year")
+                    exact  = [r for r in results if
+                              (_norm_title(r["primary_title"]) == q_norm or
+                               (r["original_title"] and _norm_title(r["original_title"]) == q_norm)) and
+                              (not year or r["start_year"] == year)]
+                    review_items.append({
+                        "path": fpath,
+                        "filename": Path(fpath).name,
+                        "reason": f"{len(exact)} exact matches" if len(exact) > 1
+                                  else ("no year in filename" if not year else "no exact match"),
+                        "results": (exact if exact else results)[:8],
+                    })
 
         # Write auto-matches to DB
         def _write_match(fpath: str, r: dict):
@@ -453,21 +467,29 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
             finally:
                 c.close()
 
-        with ThreadPoolExecutor(max_workers=IMDB_MATCH_WRITE_WORKERS) as ex:
-            futs = {ex.submit(_write_match, fpath, r): fpath for fpath, r in auto_items}
-            for fut in as_completed(futs):
-                try:
-                    fut.result()
-                    _imdbscan_progress["auto"] += 1
-                except Exception as exc:
-                    log.warning("imdbscan write: %s", exc)
-                    _imdbscan_progress["skipped"] += 1
+        if not cancelled:
+            with ThreadPoolExecutor(max_workers=IMDB_MATCH_WRITE_WORKERS) as ex:
+                futs = {ex.submit(_write_match, fpath, r): fpath for fpath, r in auto_items}
+                for fut in as_completed(futs):
+                    if _imdbscan_cancel_event.is_set():
+                        cancelled = True
+                        ex.shutdown(cancel_futures=True)
+                        break
+                    try:
+                        fut.result()
+                        _imdbscan_progress["auto"] += 1
+                    except Exception as exc:
+                        log.warning("imdbscan write: %s", exc)
+                        _imdbscan_progress["skipped"] += 1
 
         app_conn.close()
         imdb_conn.close()
 
-        _imdbscan_progress["review"] = review_items
-        _imdbscan_progress["phase"]  = "done"
+        if cancelled:
+            _imdbscan_progress["phase"] = "cancelled"
+        else:
+            _imdbscan_progress["review"] = review_items
+            _imdbscan_progress["phase"]  = "done"
     except Exception as exc:
         _imdbscan_progress["phase"] = "error"
         _imdbscan_progress["error"] = str(exc)
@@ -1440,6 +1462,9 @@ async def imdb_set_release_dates(request: Request):
     return {"ok": True, "updated": updated, "errors": errors}
 
 
+_setdates_cancel_event = threading.Event()
+
+
 def _setdates_thread() -> None:
     """Background thread: set mtime for all IMDb-matched files, skipping those already correct.
 
@@ -1447,6 +1472,7 @@ def _setdates_thread() -> None:
     backfills file_imdb.release_date in the process.
     """
     global _setdates_progress
+    _setdates_cancel_event.clear()
     _setdates_progress = {"phase": "running", "done": 0, "total": 0,
                           "skipped": 0, "updated": 0, "errors": 0, "error_log": []}
     try:
@@ -1471,7 +1497,11 @@ def _setdates_thread() -> None:
         total = len(rows)
         _setdates_progress["total"] = total
 
+        cancelled = False
         for i, (fpath, tconst, start_year, release_date) in enumerate(rows):
+            if _setdates_cancel_event.is_set():
+                cancelled = True
+                break
             _setdates_progress["done"] = i
 
             # Backfill release_date from tmdb_cache if missing
@@ -1509,8 +1539,11 @@ def _setdates_thread() -> None:
                 _setdates_progress["error_log"].append(f"{Path(fpath).name}: {exc}")
 
         conn.close()
-        _setdates_progress["done"] = total
-        _setdates_progress["phase"] = "done"
+        if cancelled:
+            _setdates_progress["phase"] = "cancelled"
+        else:
+            _setdates_progress["done"] = total
+            _setdates_progress["phase"] = "done"
     except Exception as exc:
         _setdates_progress["phase"] = "error"
         _setdates_progress["error"] = str(exc)
@@ -1523,6 +1556,15 @@ async def set_dates_bg():
     import threading
     threading.Thread(target=_setdates_thread, daemon=True).start()
     return {"started": True}
+
+
+@app.post("/imdb/set-dates-cancel")
+async def set_dates_cancel():
+    """Ask a running set-dates pass to stop at its next checkpoint."""
+    if _setdates_progress.get("phase") != "running":
+        return {"error": "Not running"}
+    _setdates_cancel_event.set()
+    return {"cancelling": True}
 
 
 @app.get("/imdb/set-dates-progress")
@@ -1566,6 +1608,16 @@ async def imdb_scan_bg(request: Request):
         daemon=True,
     ).start()
     return {"started": True}
+
+
+@app.post("/imdb/scan-cancel")
+async def imdb_scan_cancel():
+    """Ask a running scan to stop at its next checkpoint — no restart needed
+    to recover from a scan accidentally kicked off against the wrong root."""
+    if _imdbscan_progress.get("phase") != "running":
+        return {"error": "Not running"}
+    _imdbscan_cancel_event.set()
+    return {"cancelling": True}
 
 
 def _imdbscan_summary() -> dict:
@@ -3927,9 +3979,13 @@ _dbclean_progress: dict = {"phase": "idle", "checked": 0, "total": 0,
                            "meta_removed": 0, "imdb_removed": 0, "tmdb_removed": 0}
 
 
+_dbclean_cancel_event = threading.Event()
+
+
 def _dbclean_thread() -> None:
     """Remove file_meta / file_imdb rows whose paths no longer exist, then prune tmdb_cache."""
     global _dbclean_progress
+    _dbclean_cancel_event.clear()
     _dbclean_progress = {"phase": "running", "checked": 0, "total": 0,
                          "meta_removed": 0, "imdb_removed": 0, "tmdb_removed": 0}
     try:
@@ -3942,11 +3998,20 @@ def _dbclean_thread() -> None:
         total = len(all_paths)
         _dbclean_progress["total"] = total
 
+        cancelled = False
         missing: set[str] = set()
         for i, p in enumerate(all_paths):
+            if _dbclean_cancel_event.is_set():
+                cancelled = True
+                break
             _dbclean_progress["checked"] = i + 1
             if not Path(p).exists():
                 missing.add(p)
+
+        if cancelled:
+            conn.close()
+            _dbclean_progress["phase"] = "cancelled"
+            return
 
         if missing:
             placeholders = ",".join("?" * len(missing))
@@ -3986,6 +4051,16 @@ async def db_clean():
     import threading
     threading.Thread(target=_dbclean_thread, daemon=True).start()
     return {"started": True}
+
+
+@app.post("/db/clean-cancel")
+async def db_clean_cancel():
+    """Ask a running DB clean to stop at its next checkpoint. Any deletion
+    it would have made is skipped entirely on cancel (all-or-nothing)."""
+    if _dbclean_progress.get("phase") != "running":
+        return {"error": "Not running"}
+    _dbclean_cancel_event.set()
+    return {"cancelling": True}
 
 
 @app.get("/db/clean-progress")
