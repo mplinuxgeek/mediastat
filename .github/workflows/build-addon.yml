@@ -77,6 +77,10 @@ jobs:
           VERSION="${VERSION:-dev}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Record build date
+        id: build_date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6.15.0
         with:
@@ -86,6 +90,8 @@ jobs:
           push: true
           build-args: |
             BUILD_FROM=${{ matrix.base }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.build_date.outputs.date }}
           tags: |
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest

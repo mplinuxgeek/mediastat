@@ -1,5 +1,13 @@
 FROM nvidia/cuda:12.6.0-base-ubuntu24.04
 
+# Build metadata — passed via --build-arg, defaults so a plain `docker build`
+# with no args still succeeds. Lets `docker inspect` show what's actually
+# running instead of every image looking identical after a few rebuilds.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \

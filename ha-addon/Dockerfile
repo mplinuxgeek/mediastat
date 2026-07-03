@@ -1,6 +1,14 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:trixie
 FROM ${BUILD_FROM}
 
+# Build metadata — passed via --build-arg, defaults so a plain `docker build`
+# with no args still succeeds. Lets `docker inspect` show what's actually
+# running instead of every image looking identical after a few rebuilds.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
 # The HA base image only has 'main' in its apt sources.
 # non-free-firmware is required for intel-media-va-driver-non-free (QSV/VA-API).
 RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
