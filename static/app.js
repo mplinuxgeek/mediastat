@@ -38,6 +38,66 @@
         archive:  { qp: 16, preset: 'archive',  denoise: '', crop: true  },
     };
     const _ENCODE_PRESET_LABELS = { fast: 'Fast', balanced: 'Balanced', quality: 'Quality', archive: 'Archive' };
+    const _CUSTOM_PRESETS_KEY = 'mediastat_custom_encode_presets';
+
+    // ── User-savable encode presets (localStorage — per-browser, no backend
+    // needed) ───────────────────────────────────────────────────────────
+    function _loadCustomPresets() {
+        try {
+            const raw = localStorage.getItem(_CUSTOM_PRESETS_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function _saveCustomPresets(presets) {
+        try {
+            localStorage.setItem(_CUSTOM_PRESETS_KEY, JSON.stringify(presets));
+        } catch (e) {
+            showToast('Could not save preset (browser storage unavailable)', 'error');
+        }
+    }
+
+    function _renderCustomPresetButtons() {
+        const slot = document.getElementById('custom-presets-slot');
+        if (!slot) return;
+        const presets = _loadCustomPresets();
+        slot.innerHTML = Object.keys(presets).map(name => `
+            <span style="position:relative;display:inline-block">
+                <button class="encode-preset-btn" onclick="applyEncodePreset(${JSON.stringify(name)})" title="Custom preset">${escHtml(name)}</button>
+                <button onclick="event.stopPropagation();deleteCustomPreset(${JSON.stringify(name)})"
+                        title="Delete this preset" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;line-height:14px;padding:0;border-radius:50%;font-size:10px;background:var(--surface2,#333);border:1px solid var(--border);color:var(--muted);cursor:pointer">✕</button>
+            </span>`).join('');
+    }
+
+    function saveCurrentAsPreset() {
+        const name = prompt('Save current settings as a preset named:');
+        if (!name || !name.trim()) return;
+        const presets = _loadCustomPresets();
+        presets[name.trim()] = {
+            qp:      parseInt(document.getElementById('enc-qp').value, 10),
+            preset:  document.getElementById('enc-preset').value,
+            codec:   document.getElementById('enc-codec').value,
+            gpu:     document.getElementById('enc-gpu').value,
+            format:  document.getElementById('enc-format').value,
+            denoise: document.getElementById('enc-denoise').value || '',
+            crop:    document.getElementById('enc-crop').checked,
+            lang:    document.getElementById('enc-lang').value.trim() || 'eng',
+            width:   document.getElementById('enc-width').value || '',
+        };
+        _saveCustomPresets(presets);
+        _renderCustomPresetButtons();
+        applyEncodePreset(name.trim());
+        showToast(`Preset "${escHtml(name.trim())}" saved`, 'success');
+    }
+
+    function deleteCustomPreset(name) {
+        const presets = _loadCustomPresets();
+        delete presets[name];
+        _saveCustomPresets(presets);
+        _renderCustomPresetButtons();
+    }
 
     function openEncodeModal(btn) {
         const entry = btn.closest('.file-entry');
@@ -45,6 +105,7 @@
         const name  = entry.querySelector('.file-stem').textContent.trim();
         document.getElementById('encode-modal-name').textContent = name;
         document.getElementById('encode-file-path').value = path;
+        _renderCustomPresetButtons();
         applyEncodePreset('quality');
         document.getElementById('encode-modal').style.display = 'flex';
         _loadCachedEstimate(path);
@@ -77,12 +138,20 @@
         if (btn && btn._originalOnclick) { btn.onclick = btn._originalOnclick; btn._originalOnclick = null; }
     }
     function applyEncodePreset(name) {
-        const p = _ENCODE_PRESETS[name];
+        const custom = _loadCustomPresets();
+        const p = _ENCODE_PRESETS[name] || custom[name];
         if (!p) return;
         document.getElementById('enc-qp').value        = p.qp;
         document.getElementById('enc-preset').value    = p.preset;
         document.getElementById('enc-denoise').value   = p.denoise;
         document.getElementById('enc-crop').checked    = p.crop;
+        // Custom presets also capture codec/gpu/format/lang/width — built-in
+        // presets don't specify these, so applying one leaves them as-is.
+        if (p.codec !== undefined) document.getElementById('enc-codec').value = p.codec;
+        if (p.gpu !== undefined) document.getElementById('enc-gpu').value = p.gpu;
+        if (p.format !== undefined) document.getElementById('enc-format').value = p.format;
+        if (p.lang !== undefined) document.getElementById('enc-lang').value = p.lang;
+        if (p.width !== undefined) document.getElementById('enc-width').value = p.width;
         document.querySelectorAll('.encode-preset-btn').forEach(b =>
             b.classList.toggle('active', b.textContent === (_ENCODE_PRESET_LABELS[name] || name)));
     }
@@ -342,6 +411,7 @@
         const modal = document.getElementById('encode-modal');
         document.getElementById('encode-modal-name').textContent = `${checked.length} file${checked.length !== 1 ? 's' : ''}`;
         document.getElementById('encode-file-path').value = '';  // sentinel: batch mode
+        _renderCustomPresetButtons();
         applyEncodePreset('quality');
         modal.style.display = 'flex';
         // Override confirm button to do batch
@@ -489,6 +559,7 @@
         const modal = document.getElementById('encode-modal');
         document.getElementById('encode-modal-name').textContent = dirName + ' (recursive)';
         document.getElementById('encode-file-path').value = '';
+        _renderCustomPresetButtons();
         applyEncodePreset('quality');
         modal.style.display = 'flex';
         const confirmBtn = modal.querySelector('.btn-primary');
