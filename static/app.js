@@ -323,6 +323,18 @@
         updateBatchFab();
     }
 
+    // One-click "encode everything matching the current filter" — selects
+    // exactly the currently-visible files (clearing any prior selection) and
+    // jumps straight to the batch encode modal.
+    function encodeAllFiltered() {
+        document.querySelectorAll('.file-entry').forEach(entry => {
+            const cb = entry.querySelector('.batch-cb');
+            if (cb) cb.checked = (entry.style.display !== 'none');
+        });
+        updateBatchFab();
+        startBatchEncode();
+    }
+
     async function startBatchEncode() {
         const checked = [...document.querySelectorAll('.batch-cb:checked')];
         if (!checked.length) return;
