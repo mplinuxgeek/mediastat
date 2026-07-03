@@ -951,3 +951,32 @@
         .file-dir { color: var(--muted); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
         .health-ok { color: var(--green); font-size: var(--fs-base); padding: 12px 0; }
         .health-scanning { color: var(--muted); font-size: var(--fs-sm); font-style: italic; }
+
+        /* ── Basic responsive layout ──────────────────────────────────
+           Desktop layout (table-based file rows, single-line header) is
+           unchanged above this breakpoint. Below it: the header wraps
+           instead of overflowing, and each file row becomes a wrapping
+           block of badges instead of a fixed-column table row that would
+           otherwise force horizontal scrolling. This is a basic pass for
+           usability on a phone/tablet, not a full mobile redesign — the
+           three secondary admin pages (encode/databases/imdb-scan, each
+           with their own separate <style> block) are out of scope. */
+        @media (max-width: 700px) {
+            header { flex-wrap: wrap; row-gap: 8px; padding: 8px 12px; }
+
+            .files-table, .file-entry { display: block; }
+            .file-entry {
+                padding: 6px 4px;
+                border-bottom: 1px solid var(--border);
+            }
+            .file-entry:last-child { border-bottom: none; }
+            .file-name-cell, .badge-cell {
+                display: inline-block;
+                white-space: normal;
+                vertical-align: middle;
+            }
+            .file-name-cell { display: block; padding: 2px 0; }
+            .batch-checkbox-cell { display: inline-block; }
+
+            .modal { padding: 16px 18px; }
+        }
