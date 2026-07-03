@@ -11,6 +11,15 @@
             integrity="sha384-oJR5PTkR0gvqJ/UnX1IkFQgxg6BByX7jPWmgSSY5dz0+Yc7O3mloo717zZpF/xpb"
             crossorigin="anonymous"></script>
     <link rel="stylesheet" href="{{ ingress_path }}/static/app.css">
+    <script>
+        // Applied before first paint to avoid a flash of the wrong theme.
+        // Explicit user choice (localStorage) wins; otherwise follows the OS.
+        (function () {
+            var saved = localStorage.getItem('mediastat_theme');
+            var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        })();
+    </script>
 </head>
 <body>
     <header>
@@ -55,6 +64,7 @@
         </a>
         <a href="{{ ingress_path }}/imdb-scan" class="btn" title="IMDb background scan" style="margin-left:auto;text-decoration:none">⬡ IMDb</a>
         <a href="{{ ingress_path }}/databases" class="btn" title="Databases &amp; system info" style="text-decoration:none">⬡ DB</a>
+        <button class="btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch between dark and light theme">🌓</button>
     </header>
 
     <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">

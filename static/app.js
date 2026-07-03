@@ -1,4 +1,19 @@
 
+    // ── Theme toggle ──────────────────────────────────────────────
+    // Initial theme is already applied pre-paint by an inline <script> in
+    // <head> (avoids a flash of the wrong theme) — this just handles the
+    // button click and persists the explicit choice.
+    function toggleTheme() {
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        if (isLight) {
+            document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('mediastat_theme', 'dark');
+        } else {
+            document.documentElement.setAttribute('data-theme', 'light');
+            localStorage.setItem('mediastat_theme', 'light');
+        }
+    }
+
     // ── Ingress shim ─────────────────────────────────────────────
     // When running behind HA ingress all absolute paths must be prefixed.
     if (BASE_PATH) {
