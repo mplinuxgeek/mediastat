@@ -504,6 +504,11 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
         else:
             _imdbscan_progress["review"] = review_items
             _imdbscan_progress["phase"]  = "done"
+            # Scan → enrich → set-dates is meant to be one pipeline; kick off
+            # TMDB enrichment automatically instead of leaving it as a manual
+            # step someone has to remember to click after every scan.
+            if TMDB_API_KEY and _tmdb_cache_progress.get("phase") != "fetching":
+                threading.Thread(target=_tmdb_cache_thread, daemon=True).start()
     except Exception as exc:
         _imdbscan_progress["phase"] = "error"
         _imdbscan_progress["error"] = str(exc)
