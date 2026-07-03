@@ -435,6 +435,19 @@ function renderJob(id) {
     const job = _jobs[id];
     if (!job) return;
     const existing = document.getElementById('job-' + id);
+
+    // While a job's status hasn't changed (the common case: repeated
+    // progress ticks on a running job), patch just the bits that actually
+    // change in place rather than tearing down and rebuilding the whole
+    // card. Progress updates arrive every ~0.5s while encoding — replacing
+    // the action buttons that often meant a click's mouseup could land on
+    // an element that had already been swapped out from under it, so it
+    // silently never registered (had to click several times to "get lucky").
+    if (existing && existing.dataset.status === job.status) {
+        patchJobCard(existing, job);
+        return;
+    }
+
     const card = buildCard(job);
     if (existing) {
         existing.replaceWith(card);
@@ -452,15 +465,109 @@ function renderJob(id) {
     }).forEach(el => list.appendChild(el));
 }
 
+// Updates only the parts of a job card that change from one progress tick
+// to the next (progress bar, stats, meta/encoder line, error text) without
+// touching the action buttons — see renderJob's comment for why.
+function patchJobCard(el, job) {
+    const pct = Math.min(100, job.progress || 0);
+    const barCls = job.status === 'done' ? 'done' : job.status === 'failed' ? 'failed' : '';
+    const bar = el.querySelector('.job-bar-fill');
+    if (bar) {
+        bar.style.width = pct + '%';
+        bar.className = `job-bar-fill ${barCls}`.trim();
+    }
+    const pctLabel = el.querySelector('.job-pct');
+    if (pctLabel) pctLabel.textContent = pct.toFixed(1) + '%';
+
+    const stats = el.querySelector('.job-stats');
+    if (stats) stats.innerHTML = buildStatsHtml(job);
+
+    // Encoder is detected after the job starts, so the meta line and its
+    // badge can still change while status stays "running".
+    const meta = el.querySelector('.job-meta');
+    if (meta) meta.innerHTML = buildMetaHtml(job);
+    const encBadgeSlot = el.querySelector('.job-enc-badge-slot');
+    if (encBadgeSlot) encBadgeSlot.innerHTML = encBadgeHtml(job.encoder);
+
+    let errDiv = el.querySelector('.job-error');
+    if (job.error) {
+        if (!errDiv) {
+            errDiv = document.createElement('div');
+            errDiv.className = 'job-error';
+            el.appendChild(errDiv);
+        }
+        errDiv.textContent = `Error: ${job.error}`;
+    } else if (errDiv) {
+        errDiv.remove();
+    }
+
+    // Queued jobs: reorder-button disabled state can change (queue position
+    // shifted) without a status transition — patch the attribute in place,
+    // never replace the buttons themselves.
+    if (job.status === 'queued') {
+        const pos = job.queue_pos ?? -1;
+        const qLen = Object.values(_jobs).filter(j => j.status === 'queued').length;
+        const front = el.querySelector('.job-action-btn.reorder[onclick*="\'front\'"]');
+        const up    = el.querySelector('.job-action-btn.reorder[onclick*="\'up\'"]');
+        const down  = el.querySelector('.job-action-btn.reorder[onclick*="\'down\'"]');
+        if (front) front.disabled = pos <= 0;
+        if (up)    up.disabled    = pos <= 0;
+        if (down)  down.disabled  = (pos < 0 || pos >= qLen - 1);
+    }
+}
+
 function updateNoJobs() {
     const noJobs = document.getElementById('no-jobs');
     noJobs.style.display = Object.keys(_jobs).length === 0 ? '' : 'none';
+}
+
+// Meta line: encoder + config. Shared by buildCard (initial render) and
+// patchJobCard (in-place update) so the two never drift apart.
+function buildMetaHtml(job) {
+    const qp = job.config?.qp ?? '';
+    const preset = job.config?.preset ?? '';
+    const denoise = job.config?.denoise ? `· denoise:${job.config.denoise}` : '';
+    const crop = job.config?.crop ? '· crop' : '';
+    const enc = job.encoder || 'detecting…';
+    const metaParts = [enc, qp ? `QP:${qp}` : '', preset, denoise, crop].filter(Boolean);
+    return metaParts.map(p => `<span>${p}</span>`).join('');
+}
+
+// Stats line — shared by buildCard and patchJobCard, see buildMetaHtml.
+function buildStatsHtml(job) {
+    if (job.status === 'running') {
+        const estSize = (job.output_size && job.progress > 0)
+            ? fmtSize((job.output_size / job.progress) * 100) : null;
+        const elapsed = job.started_at ? (Date.now() / 1000 - job.started_at) : 0;
+        const eta = (elapsed > 2 && job.progress > 0.5)
+            ? fmtDuration(elapsed / job.progress * (100 - job.progress)) : '--';
+        return `
+            <span>FPS: <span class="stat-val">${job.current_fps.toFixed(1)}</span> cur / <span class="stat-val">${job.avg_fps.toFixed(1)}</span> avg</span>
+            <span>ETA: <span class="stat-val">${eta}</span></span>
+            ${job.input_size   ? `<span>Input: <span class="stat-val">${fmtSize(job.input_size)}</span></span>` : ''}
+            ${job.output_size  ? `<span>Size: <span class="stat-val">${fmtSize(job.output_size)}</span>${estSize ? ` / <span class="stat-val">${estSize}</span> est` : ''}</span>` : ''}`;
+    } else if (job.status === 'done') {
+        const elapsed = job.started_at && job.finished_at ? fmtDuration(job.finished_at - job.started_at) : '';
+        let reduc = '';
+        if (job.input_size && job.output_size) {
+            const pct2 = ((1 - job.output_size / job.input_size) * 100).toFixed(1);
+            const cls = parseFloat(pct2) > 0 ? 'stat-green' : 'stat-red';
+            const sign = parseFloat(pct2) > 0 ? '↓' : '↑';
+            reduc = `<span><span class="stat-val">${fmtSize(job.input_size)}</span> → <span class="stat-val">${fmtSize(job.output_size)}</span> <span class="${cls}">(${sign}${Math.abs(parseFloat(pct2))}%)</span></span>`;
+        }
+        const fpsStat = job.avg_fps > 0 ? `<span>Avg FPS: <span class="stat-val">${job.avg_fps.toFixed(1)}</span></span>` : '';
+        return `${reduc}${elapsed ? `<span>Time: <span class="stat-val">${elapsed}</span></span>` : ''}${fpsStat}`;
+    } else if (job.status === 'queued') {
+        return `<span>Waiting to start…</span>`;
+    }
+    return '';
 }
 
 function buildCard(job) {
     const div = document.createElement('div');
     div.id = 'job-' + job.id;
     div.className = `job-card ${job.status}`;
+    div.dataset.status = job.status;
 
     const badgeLabels = { queued: 'Queued', running: 'Encoding', done: 'Done ✓', failed: 'Failed ✗', cancelled: 'Cancelled' };
     const badge = `<span class="job-badge badge-${job.status}">${badgeLabels[job.status] || job.status}</span>`;
@@ -496,15 +603,6 @@ function buildCard(job) {
     const outName = job.output_name;
     const inName  = job.input_name;
 
-    // Meta line: encoder + config
-    const qp = job.config?.qp ?? '';
-    const preset = job.config?.preset ?? '';
-    const gpu = job.config?.gpu ?? 'auto';
-    const denoise = job.config?.denoise ? `· denoise:${job.config.denoise}` : '';
-    const crop = job.config?.crop ? '· crop' : '';
-    const enc = job.encoder || 'detecting…';
-    const metaParts = [enc, qp ? `QP:${qp}` : '', preset, denoise, crop].filter(Boolean);
-
     // Media info row
     let mediaInfoHtml = '';
     const mi = job.input_media_info;
@@ -531,38 +629,10 @@ function buildCard(job) {
     const pct = Math.min(100, job.progress || 0);
     const barCls = job.status === 'done' ? 'done' : job.status === 'failed' ? 'failed' : '';
 
-    // Stats
-    let statsHtml = '';
-    if (job.status === 'running') {
-        const estSize = (job.output_size && job.progress > 0)
-            ? fmtSize((job.output_size / job.progress) * 100) : null;
-        const elapsed = job.started_at ? (Date.now() / 1000 - job.started_at) : 0;
-        const eta = (elapsed > 2 && job.progress > 0.5)
-            ? fmtDuration(elapsed / job.progress * (100 - job.progress)) : '--';
-        statsHtml = `
-            <span>FPS: <span class="stat-val">${job.current_fps.toFixed(1)}</span> cur / <span class="stat-val">${job.avg_fps.toFixed(1)}</span> avg</span>
-            <span>ETA: <span class="stat-val">${eta}</span></span>
-            ${job.input_size   ? `<span>Input: <span class="stat-val">${fmtSize(job.input_size)}</span></span>` : ''}
-            ${job.output_size  ? `<span>Size: <span class="stat-val">${fmtSize(job.output_size)}</span>${estSize ? ` / <span class="stat-val">${estSize}</span> est` : ''}</span>` : ''}`;
-    } else if (job.status === 'done') {
-        const elapsed = job.started_at && job.finished_at ? fmtDuration(job.finished_at - job.started_at) : '';
-        let reduc = '';
-        if (job.input_size && job.output_size) {
-            const pct2 = ((1 - job.output_size / job.input_size) * 100).toFixed(1);
-            const cls = parseFloat(pct2) > 0 ? 'stat-green' : 'stat-red';
-            const sign = parseFloat(pct2) > 0 ? '↓' : '↑';
-            reduc = `<span><span class="stat-val">${fmtSize(job.input_size)}</span> → <span class="stat-val">${fmtSize(job.output_size)}</span> <span class="${cls}">(${sign}${Math.abs(parseFloat(pct2))}%)</span></span>`;
-        }
-        const fpsStat = job.avg_fps > 0 ? `<span>Avg FPS: <span class="stat-val">${job.avg_fps.toFixed(1)}</span></span>` : '';
-        statsHtml = `${reduc}${elapsed ? `<span>Time: <span class="stat-val">${elapsed}</span></span>` : ''}${fpsStat}`;
-    } else if (job.status === 'queued') {
-        statsHtml = `<span>Waiting to start…</span>`;
-    }
-
     div.innerHTML = `
         <div class="job-header">
             ${badge}
-            ${encBadgeHtml(job.encoder)}
+            <span class="job-enc-badge-slot">${encBadgeHtml(job.encoder)}</span>
             <div class="job-name">
                 <div title="${escHtml(outName)}">${escHtml(outName)}</div>
                 <div class="input-name" title="${escHtml(inName)}">from: ${escHtml(inName)}</div>
@@ -570,7 +640,7 @@ function buildCard(job) {
             ${action}
         </div>
         <div class="job-meta">
-            ${metaParts.map(p => `<span>${p}</span>`).join('')}
+            ${buildMetaHtml(job)}
         </div>
         ${mediaInfoHtml}
         <div class="job-bar-row">
@@ -579,7 +649,7 @@ function buildCard(job) {
             </div>
             <span class="job-pct">${pct.toFixed(1)}%</span>
         </div>
-        <div class="job-stats">${statsHtml}</div>
+        <div class="job-stats">${buildStatsHtml(job)}</div>
         ${job.error ? `<div class="job-error">Error: ${escHtml(job.error)}</div>` : ''}`;
     return div;
 }
