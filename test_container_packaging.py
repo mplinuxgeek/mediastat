@@ -38,6 +38,16 @@ class ContainerPackagingTests(unittest.TestCase):
         dockerfile = (ROOT / "ha-addon" / "Dockerfile").read_text()
         self.assertIn("COPY encode_estimate.py .", dockerfile)
 
+    def test_main_image_has_healthcheck(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn("HEALTHCHECK", dockerfile)
+        self.assertIn("/healthz", dockerfile)
+
+    def test_ha_addon_image_has_healthcheck(self):
+        dockerfile = (ROOT / "ha-addon" / "Dockerfile").read_text()
+        self.assertIn("HEALTHCHECK", dockerfile)
+        self.assertIn("/healthz", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

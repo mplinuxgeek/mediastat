@@ -53,4 +53,7 @@ RUN mkdir -p /data /app/static
 COPY ha-addon/run.sh /run.sh
 RUN chmod +x /run.sh
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=3)" || exit 1
+
 CMD ["/run.sh"]

@@ -209,6 +209,14 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.filters["pathquote"] = lambda p: quote(str(p), safe="")
 
 
+@app.get("/healthz")
+async def healthz():
+    """Cheap liveness probe — no I/O, just confirms the event loop is
+    responsive. Not to be confused with /health-check, which runs a full
+    ffprobe scan of the media library and is a user-triggered feature."""
+    return {"status": "ok"}
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     qs = f"?{request.url.query}" if request.url.query else ""
