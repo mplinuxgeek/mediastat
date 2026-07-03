@@ -21,7 +21,7 @@
         <input type="checkbox" class="batch-cb" onclick="batchCbClick(event, this)">
     </span>
     <span class="file-name-cell">
-        <button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span> <span class="tag imdb-rating-badge" style="display:none"></span>
+        <img class="poster-thumb" style="display:none" alt="" onerror="this.style.display='none'"><button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span> <span class="tag imdb-rating-badge" style="display:none"></span>
     </span>
     <span class="badge-cell"><span class="tag {{ file.ext_class }}">{{ file.ext }}</span></span>
     <span class="badge-cell"><span class="tag {{ file.size_class }}">{{ file.human_size }}</span></span>

@@ -670,6 +670,15 @@
         .file-stem { cursor: pointer; user-select: none; }
         .file-stem:hover { color: var(--accent); }
         .file-stem.name-copied { color: var(--green) !important; transition: color 0s; }
+        .poster-thumb {
+            width: 20px;
+            height: 28px;
+            object-fit: cover;
+            border-radius: 2px;
+            vertical-align: middle;
+            margin-right: 4px;
+        }
+
         .play-btn {
             background: transparent;
             border: 1px solid var(--border);

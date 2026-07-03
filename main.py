@@ -1733,6 +1733,7 @@ async def imdb_matches(dir: str = Query(...)):
         ) as cur:
             rows = await cur.fetchall()
     result = {}
+    tconsts: list[str] = []
     for path, tconst, primary_title, start_year, genres, runtime_minutes, source, release_date, rating in rows:
         # Only direct children (no further slashes beyond the prefix)
         if "/" not in path[len(prefix):]:
@@ -1743,7 +1744,30 @@ async def imdb_matches(dir: str = Query(...)):
                 "source": source or "imdb",
                 "release_date": release_date,
                 "average_rating": rating,
+                "poster_path": None,
             }
+            if tconst:
+                tconsts.append(tconst)
+
+    # file_imdb and tmdb_cache live in separate DB files — look up posters
+    # in a second query rather than a cross-file JOIN. Best-effort: TMDB
+    # enrichment may not have run yet, or may not be configured at all.
+    if tconsts:
+        try:
+            placeholders = ",".join("?" * len(tconsts))
+            async with aiosqlite.connect(TMDB_DB_PATH) as tdb:
+                async with tdb.execute(
+                    f"SELECT tconst, poster_path FROM tmdb_cache WHERE tconst IN ({placeholders})",
+                    tconsts,
+                ) as cur:
+                    poster_rows = await cur.fetchall()
+            posters = {tconst: poster_path for tconst, poster_path in poster_rows if poster_path}
+            for info in result.values():
+                if info["tconst"] in posters:
+                    info["poster_path"] = posters[info["tconst"]]
+        except Exception:
+            pass  # tmdb.db may not exist yet — posters just stay None
+
     return result
 
 

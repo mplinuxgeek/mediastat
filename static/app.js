@@ -1144,6 +1144,18 @@
                 delete row.dataset.imdbRating;
             }
         }
+        // Poster thumbnail, hotlinked directly from TMDB's image CDN — no
+        // server-side fetch/caching, the browser handles it like any <img>.
+        const poster = row.querySelector('.poster-thumb');
+        if (poster) {
+            if (info.poster_path) {
+                poster.src = 'https://image.tmdb.org/t/p/w92' + info.poster_path;
+                poster.style.display = '';
+            } else {
+                poster.removeAttribute('src');
+                poster.style.display = 'none';
+            }
+        }
     }
 
     function _imdbClearBadge(row) {
@@ -1151,6 +1163,8 @@
         if (tag) { tag.textContent = 'IMDb'; tag.classList.remove('matched'); }
         const ratingBadge = row.querySelector('.imdb-rating-badge');
         if (ratingBadge) { ratingBadge.style.display = 'none'; ratingBadge.textContent = ''; }
+        const poster = row.querySelector('.poster-thumb');
+        if (poster) { poster.removeAttribute('src'); poster.style.display = 'none'; }
         delete row.dataset.imdbTitle;
         delete row.dataset.imdbYear;
         delete row.dataset.imdbTconst;
