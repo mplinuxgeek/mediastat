@@ -3290,7 +3290,8 @@ async def _run_estimate(path: str, config: dict) -> None:
     tmp_dir: Optional[str] = None
     try:
         _estimate_state = {"status": "probing", "results": [], "suggested_qp": None,
-                            "warning": None, "error": None, "current_qp": None, "qp_progress": 0.0}
+                            "warning": None, "error": None, "current_qp": None, "qp_progress": 0.0,
+                            "path": path, "config": config}
         _broadcast_estimate()
 
         input_path = Path(path)
@@ -4175,6 +4176,46 @@ async def estimate_history(path: str = Query(...)):
     if state is None:
         raise HTTPException(status_code=404, detail="No cached estimate for this file")
     return state
+
+
+@app.post("/encode/estimate/apply")
+async def apply_estimate(request: Request, path: str = Query(...)):
+    """Queue a real encode using a completed estimate's suggested QP (or an
+    explicit qp in the body) and the same codec/gpu/preset/etc. settings the
+    estimate itself was run with — no need to re-read the number and retype
+    it into the QP field."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    file_path = safe_path(path)
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    state = _estimate_state if _estimate_state.get("path") == str(file_path) else None
+    if not state or state.get("status") != "done":
+        state = _estimate_history.get(str(file_path))
+    if not state or state.get("status") != "done":
+        raise HTTPException(status_code=409, detail="No completed estimate for this file")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    qp = body.get("qp", state.get("suggested_qp"))
+    if qp is None:
+        raise HTTPException(status_code=409, detail="Estimate has no suggested QP")
+
+    config = _make_encode_config({**(state.get("config") or {}), "qp": qp})
+
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(status_code=400, detail="ffmpeg not found in PATH")
+    await _check_free_space(file_path.parent, [file_path])
+
+    job_id = _queue_file_encode(file_path, config)
+    if not job_id:
+        raise HTTPException(status_code=400, detail="ffmpeg not found in PATH")
+    await _save_encode_job(_encode_jobs[job_id])
+    _enqueue_job(job_id)
+    return {"job_id": job_id, "output": _encode_jobs[job_id].output_path}
 
 
 @app.get("/encode/estimate/events")

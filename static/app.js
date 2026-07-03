@@ -149,7 +149,10 @@
                 <td style="padding:4px">${r.ssim != null ? r.ssim.toFixed(4) : '—'}</td>
                 <td style="padding:4px">${r.seconds}s</td>
                 <td style="padding:4px">${_fmtBytes(r.estimated_full_bytes)}</td>
-                <td style="padding:4px"><button class="btn ${recommended ? 'btn-primary' : ''}" style="padding:2px 8px;font-size:var(--fs-xs)" onclick="_useEstimatedQp(${r.qp})">Use</button></td>
+                <td style="padding:4px;white-space:nowrap">
+                    <button class="btn" style="padding:2px 6px;font-size:var(--fs-xs)" onclick="_useEstimatedQp(${r.qp})" title="Fill the QP field with ${r.qp} — review before starting">Use</button>
+                    <button class="btn ${recommended ? 'btn-primary' : ''}" style="padding:2px 6px;font-size:var(--fs-xs)" onclick="_applyEstimatedQp(${r.qp})" title="Queue a real encode at QP ${r.qp} right now">▶ Encode</button>
+                </td>
             </tr>`;
         }).join('');
         const pending = _ESTIMATE_QPS.filter(qp => !state.results.some(r => r.qp === qp));
@@ -240,6 +243,29 @@
     function _useEstimatedQp(qp) {
         document.getElementById('enc-qp').value = qp;
         document.getElementById('estimate-panel').style.display = 'none';
+    }
+
+    async function _applyEstimatedQp(qp) {
+        const path = document.getElementById('encode-file-path').value;
+        if (!path) return;
+        try {
+            const resp = await fetch('/encode/estimate/apply?path=' + encodeURIComponent(path), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+                body: JSON.stringify({ qp }),
+            });
+            if (!resp.ok) {
+                const txt = await resp.text();
+                showToast('Encode failed: ' + escHtml(txt), 'error');
+                return;
+            }
+            _encodingPaths.add(path);
+            _markEncodingRows();
+            closeEncodeModal();
+            showToast('Encode started at QP ' + qp + ' · <a href="' + BASE_PATH + '/encode">View progress →</a>', 'success', 6000);
+        } catch (e) {
+            showToast('Error: ' + escHtml(e.message), 'error');
+        }
     }
 
     // ── Batch encode ─────────────────────────────────────────────
