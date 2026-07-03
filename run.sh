@@ -9,6 +9,14 @@ HOST_CONFIG="${HOST_DATA}/config.yaml"
 IMAGE_TAG="mediastat-local"
 CONTAINER_NAME="mediastat-local"
 
+# ./run.sh --rollback — skip the build entirely and recreate the container
+# from the image tagged :prev (the one running before the last rebuild),
+# for when a rebuild turns out bad. Only one rollback level is kept.
+ROLLBACK=false
+if [ "${1:-}" = "--rollback" ]; then
+    ROLLBACK=true
+fi
+
 UID_=$(id -u)
 GID_=$(id -g)
 
@@ -31,12 +39,28 @@ directories:
 EOF
 fi
 
-GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-docker build -f ha-addon/Dockerfile \
-    --build-arg GIT_SHA="${GIT_SHA}" \
-    --build-arg BUILD_DATE="${BUILD_DATE}" \
-    -t "${IMAGE_TAG}" .
+if [ "${ROLLBACK}" = true ]; then
+    if ! docker image inspect "${IMAGE_TAG}:prev" >/dev/null 2>&1; then
+        echo "No ${IMAGE_TAG}:prev image to roll back to (need at least one prior successful build/rerun)." >&2
+        exit 1
+    fi
+    echo "Rolling back: ${IMAGE_TAG}:prev -> ${IMAGE_TAG}:latest"
+    docker tag "${IMAGE_TAG}:prev" "${IMAGE_TAG}:latest"
+else
+    # Save the currently-running image as :prev before replacing it, so a bad
+    # rebuild can be undone with `./run.sh --rollback` instead of re-cloning
+    # and rebuilding an old commit.
+    if docker image inspect "${IMAGE_TAG}:latest" >/dev/null 2>&1; then
+        docker tag "${IMAGE_TAG}:latest" "${IMAGE_TAG}:prev"
+    fi
+
+    GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+    BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    docker build -f ha-addon/Dockerfile \
+        --build-arg GIT_SHA="${GIT_SHA}" \
+        --build-arg BUILD_DATE="${BUILD_DATE}" \
+        -t "${IMAGE_TAG}:latest" .
+fi
 
 # Recreate the container from the freshly built image. Run this script again
 # after any rebuild to pick up the new image; old container is discarded.
@@ -60,3 +84,4 @@ docker run -d \
         --proxy-headers --forwarded-allow-ips '*'
 
 echo "mediastat-local up on :8081. logs: docker logs -f ${CONTAINER_NAME}"
+echo "roll back a bad update with: ./run.sh --rollback"
