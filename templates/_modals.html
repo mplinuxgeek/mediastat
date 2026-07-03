@@ -72,7 +72,7 @@
         </div>
     </div>
     <div id="encode-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEncodeModal()">
-        <div class="modal" style="max-width:640px">
+        <div class="modal" style="max-width:min(760px, 95vw)">
             <div class="modal-title">⚙ Encode: <span id="encode-modal-name" style="color:var(--muted);font-weight:normal"></span></div>
             <div class="encode-presets" id="encode-presets-row">
                 <button class="encode-preset-btn" onclick="applyEncodePreset('fast')"     title="Fast encode — lower quality, much quicker">Fast</button>

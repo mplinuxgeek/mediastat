@@ -631,6 +631,8 @@
             min-width: 320px;
             max-width: 500px;
             width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
         }
         .modal-title { font-weight: 600; margin-bottom: 10px; }
         .modal-close-x {
