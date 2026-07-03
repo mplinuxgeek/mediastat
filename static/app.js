@@ -2635,6 +2635,15 @@
                     row.appendChild(sc);
                 }
 
+                if (group.length > 1) {
+                    const keepBtn = document.createElement('button');
+                    keepBtn.className = 'delete-btn';
+                    keepBtn.title = 'Keep only this file — deletes every other file in this group';
+                    keepBtn.textContent = '✓ Keep only this';
+                    keepBtn.onclick = () => _keepOnlyThisDupe(div, group, file);
+                    row.appendChild(keepBtn);
+                }
+
                 const del = document.createElement('button');
                 del.className = 'delete-btn';
                 del.title = 'Delete this file';
@@ -2653,6 +2662,40 @@
             });
             body.appendChild(div);
         });
+    }
+
+    async function _keepOnlyThisDupe(groupEl, group, keepFile) {
+        const others = group.map(g => g.file).filter(f => f.path !== keepFile.path);
+        if (!others.length) return;
+        const keepName = keepFile.path.split('/').pop();
+        const otherNames = others.map(f => f.path.split('/').pop()).join('\n');
+        if (!confirm(`Keep "${keepName}" and delete ${others.length} other file(s)?\n\n${otherNames}`)) return;
+
+        const results = await Promise.all(others.map(f =>
+            fetch('/file?path=' + encodeURIComponent(f.path), {
+                method: 'DELETE',
+                headers: { 'X-Delete-Token': DELETE_TOKEN },
+            }).then(r => r.ok).catch(() => false)
+        ));
+        const deleted = results.filter(Boolean).length;
+        const failed = others.length - deleted;
+
+        // Best-effort: drop the deleted files' rows from the main browser table too
+        others.forEach((f, i) => {
+            if (!results[i]) return;
+            const mainRow = document.querySelector(`.file-entry[data-path="${CSS.escape(f.path)}"]`);
+            if (mainRow) mainRow.remove();
+        });
+
+        if (deleted === others.length) {
+            groupEl.remove();
+        } else {
+            runDupesScan();  // partial failure — refresh from server to reflect real state
+        }
+        showToast(
+            `Kept "${keepName}" · deleted ${deleted}${failed ? ` · ${failed} failed` : ''}`,
+            failed ? 'error' : 'success', 5000
+        );
     }
 
     async function runDupesScan() {
