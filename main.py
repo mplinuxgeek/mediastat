@@ -4602,8 +4602,8 @@ async def reorder_encode(job_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
     direction = body.get("direction")
-    if direction not in ("up", "down"):
-        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+    if direction not in ("up", "down", "front"):
+        raise HTTPException(status_code=400, detail="direction must be 'up', 'down', or 'front'")
     if job_id not in _encode_queue_list:
         raise HTTPException(status_code=404, detail="Job not in queue")
     idx = _encode_queue_list.index(job_id)
@@ -4611,6 +4611,10 @@ async def reorder_encode(job_id: str, request: Request):
         _encode_queue_list[idx], _encode_queue_list[idx - 1] = _encode_queue_list[idx - 1], _encode_queue_list[idx]
     elif direction == "down" and idx < len(_encode_queue_list) - 1:
         _encode_queue_list[idx], _encode_queue_list[idx + 1] = _encode_queue_list[idx + 1], _encode_queue_list[idx]
+    elif direction == "front" and idx > 0:
+        # Only reorders among still-queued jobs — can't preempt one already running.
+        _encode_queue_list.pop(idx)
+        _encode_queue_list.insert(0, job_id)
     _broadcast_queue_order()
     return Response(status_code=204)
 

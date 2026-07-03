@@ -472,7 +472,8 @@ function buildCard(job) {
         if (job.status === 'queued') {
             const pos = job.queue_pos ?? -1;
             const qLen = Object.values(_jobs).filter(j => j.status === 'queued').length;
-            action = `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','up')" ${pos <= 0 ? 'disabled' : ''} title="Move up">↑</button>`
+            action = `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','front')" ${pos <= 0 ? 'disabled' : ''} title="Move to front of queue">⤒</button>`
+                   + `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','up')" ${pos <= 0 ? 'disabled' : ''} title="Move up">↑</button>`
                    + `<button class="job-action-btn reorder" onclick="reorderJob('${job.id}','down')" ${pos < 0 || pos >= qLen - 1 ? 'disabled' : ''} title="Move down">↓</button>`
                    + `<button class="job-action-btn cancel" onclick="cancelJob('${job.id}')" style="margin-left:4px">✕ Cancel</button>`;
         } else {
