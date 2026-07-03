@@ -286,6 +286,9 @@
             summary.innerHTML = `<span style="color:var(--danger,#c0392b)">Estimate failed: ${escHtml(state.error || 'unknown error')}</span>`;
         } else if (state.status === 'done') {
             let html = `<span>Suggested: <strong>QP ${state.suggested_qp}</strong> ★</span>`;
+            html += `<button class="btn" style="padding:4px 10px;font-size:var(--fs-sm)"
+                        onclick="_applyEstimateToSelectedBatch(${state.suggested_qp})"
+                        title="Queue a real encode at this QP for every other file currently checked in batch mode — skips re-sampling each one">📤 Apply to selected files</button>`;
             if (state.warning) html += `<span style="color:var(--muted);font-size:var(--fs-xs)">${escHtml(state.warning)}</span>`;
             summary.innerHTML = html;
         } else {
@@ -372,6 +375,49 @@
         } catch (e) {
             showToast('Error: ' + escHtml(e.message), 'error');
         }
+    }
+
+    // Apply this estimate's QP (and the modal's other settings) to every
+    // other file currently checked in batch mode — for a season/franchise
+    // where sampling each file individually would be wasteful once one
+    // file's estimate looks representative of the rest.
+    async function _applyEstimateToSelectedBatch(qp) {
+        const currentPath = document.getElementById('encode-file-path').value;
+        const others = [...document.querySelectorAll('.batch-cb:checked')]
+            .map(cb => cb.closest('.file-entry')?.dataset.path)
+            .filter(p => p && p !== currentPath);
+        if (!others.length) {
+            showToast('No other files selected — check some in batch mode first', 'error');
+            return;
+        }
+        const config = {
+            qp,
+            preset:  document.getElementById('enc-preset').value,
+            codec:   document.getElementById('enc-codec').value,
+            gpu:     document.getElementById('enc-gpu').value,
+            format:  document.getElementById('enc-format').value,
+            denoise: document.getElementById('enc-denoise').value || null,
+            crop:    document.getElementById('enc-crop').checked,
+            lang:    document.getElementById('enc-lang').value.trim().toLowerCase() || 'eng',
+            width:   document.getElementById('enc-width').value ? parseInt(document.getElementById('enc-width').value, 10) : null,
+        };
+        const results = await Promise.all(others.map(path =>
+            fetch('/encode?path=' + encodeURIComponent(path), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+                body: JSON.stringify(config),
+            }).then(r => r.ok).catch(() => false)
+        ));
+        others.forEach((path, i) => { if (results[i]) _encodingPaths.add(path); });
+        _markEncodingRows();
+        const started = results.filter(Boolean).length;
+        closeEncodeModal();
+        showToast(
+            `QP ${qp} applied to ${started} file${started !== 1 ? 's' : ''}` +
+            (started < others.length ? ` · ${others.length - started} failed` : '') +
+            ` · <a href="${BASE_PATH}/encode">View progress →</a>`,
+            'success', 7000
+        );
     }
 
     // ── Batch encode ─────────────────────────────────────────────
