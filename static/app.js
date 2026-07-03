@@ -1919,12 +1919,54 @@
         });
     }
 
+    // Recognized search tokens — e.g. "1080p x265 -hdr" narrows by resolution/
+    // codec/HDR directly in the search box instead of needing the filter-button
+    // bar, with a leading "-" excluding instead of requiring. Anything else is
+    // treated as a plain substring match against the filename (AND-combined
+    // across multiple such terms).
+    const _RES_TOKENS = { '4k': '4k', '2160p': '4k', 'uhd': '4k', '1080p': '1080p', 'fhd': '1080p',
+                           '720p': '720p', 'hd': '720p', '480p': 'sd', 'sd': 'sd' };
+    const _CODEC_TOKENS = { 'h265': 'h265', 'x265': 'h265', 'hevc': 'h265',
+                             'h264': 'h264', 'x264': 'h264', 'avc': 'h264',
+                             'av1': 'av1', 'vp9': 'vp9' };
+    const _HDR_TOKENS = { 'hdr': 'HDR', 'hdr10': 'HDR', 'dv': 'DV', 'dolbyvision': 'DV',
+                           'hlg': 'HLG', 'sdr': 'SDR' };
+
+    function _parseSearchQuery(raw) {
+        const q = {
+            nameTerms: [], includeRes: new Set(), excludeRes: new Set(),
+            includeCodec: new Set(), excludeCodec: new Set(),
+            includeHdr: new Set(), excludeHdr: new Set(),
+        };
+        for (const rawTok of raw.trim().toLowerCase().split(/\s+/).filter(Boolean)) {
+            const negate = rawTok.startsWith('-');
+            const tok = negate ? rawTok.slice(1) : rawTok;
+            if (!tok) continue;
+            if (_RES_TOKENS[tok])          (negate ? q.excludeRes   : q.includeRes).add(_RES_TOKENS[tok]);
+            else if (_CODEC_TOKENS[tok])   (negate ? q.excludeCodec : q.includeCodec).add(_CODEC_TOKENS[tok]);
+            else if (_HDR_TOKENS[tok])     (negate ? q.excludeHdr   : q.includeHdr).add(_HDR_TOKENS[tok]);
+            else if (!negate)              q.nameTerms.push(tok);
+        }
+        return q;
+    }
+
     function applyFilters() {
-        const term = (document.getElementById('search-input').value || '').trim().toLowerCase();
+        const rawTerm = document.getElementById('search-input').value || '';
+        const q = _parseSearchQuery(rawTerm);
         document.querySelectorAll('.files-table > .file-entry').forEach(e => {
-            if (term && !(e.dataset.name || '').includes(term)) { e.style.display = 'none'; return; }
+            const name = e.dataset.name || '';
+            if (q.nameTerms.length && !q.nameTerms.every(t => name.includes(t))) { e.style.display = 'none'; return; }
+            const res = resTag(parseInt(e.dataset.width) || 0, parseInt(e.dataset.height) || 0);
+            if (q.includeRes.size && !q.includeRes.has(res)) { e.style.display = 'none'; return; }
+            if (q.excludeRes.has(res)) { e.style.display = 'none'; return; }
+            const codec = _normalizeCodecVal(e.dataset.vcodec || '');
+            if (q.includeCodec.size && !q.includeCodec.has(codec)) { e.style.display = 'none'; return; }
+            if (q.excludeCodec.has(codec)) { e.style.display = 'none'; return; }
+            const hdr = e.dataset.hdr || '';
+            if (q.includeHdr.size && !q.includeHdr.has(hdr)) { e.style.display = 'none'; return; }
+            if (q.excludeHdr.has(hdr)) { e.style.display = 'none'; return; }
             if (_filterState.codec.size > 0 && ![..._filterState.codec].some(v => codecMatches(e.dataset.vcodec || '', v))) { e.style.display = 'none'; return; }
-            if (_filterState.res.size > 0 && !_filterState.res.has(resTag(parseInt(e.dataset.width) || 0, parseInt(e.dataset.height) || 0))) { e.style.display = 'none'; return; }
+            if (_filterState.res.size > 0 && !_filterState.res.has(res)) { e.style.display = 'none'; return; }
             if (_filterState.ext.size > 0 && !_filterState.ext.has(e.dataset.ext || '')) { e.style.display = 'none'; return; }
             if (_filterState.audio.size > 0 && !_filterState.audio.has(e.dataset.audio || '')) { e.style.display = 'none'; return; }
             if (_filterState.hdr.size > 0 && !_filterState.hdr.has(e.dataset.hdr || '')) { e.style.display = 'none'; return; }
@@ -1932,7 +1974,10 @@
             e.style.display = '';
         });
         document.querySelectorAll('.dirs-container > .dir-entry')
-                .forEach(e => { e.style.display = (!term || (e.dataset.name || '').includes(term)) ? '' : 'none'; });
+                .forEach(e => {
+                    const name = e.dataset.name || '';
+                    e.style.display = (!q.nameTerms.length || q.nameTerms.every(t => name.includes(t))) ? '' : 'none';
+                });
     }
 
     let _filterTimer = null;

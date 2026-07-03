@@ -32,8 +32,9 @@
             {% endif %}
         </form>
         <input id="search-input" class="search-input" type="search"
-               placeholder="search…" autocomplete="off" spellcheck="false"
-               oninput="applyGlobalSearch()">
+               placeholder="search… try 1080p x265 -hdr" autocomplete="off" spellcheck="false"
+               oninput="applyGlobalSearch()"
+               title="Tokens: resolution (4k/1080p/720p/sd), codec (h265/h264/av1/vp9), HDR (hdr/dv/hlg/sdr). Prefix with - to exclude. Anything else matches the filename.">
         <button class="btn" onclick="openSearchSettings()" title="Configure search sites">⚙ searches</button>
         <button class="btn" onclick="openDupesModal()" title="Find likely duplicate files by name similarity">⊕ dupes</button>
         <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
