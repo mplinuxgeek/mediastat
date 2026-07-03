@@ -231,6 +231,18 @@
             </div>
         </div>
 
+        <div class="db-card">
+            <div class="db-card-title">Backup</div>
+            <div style="font-size:var(--fs-xs);color:var(--muted);margin-bottom:8px">
+                Snapshots mediastat.db (IMDb/TMDB matches, encode job history) — cheap insurance
+                against a corrupted DB or a bad update. Keeps the last 5 backups.
+            </div>
+            <div class="db-actions">
+                <button class="btn" id="dbbackup-btn" onclick="runDbBackup()">⤓ Backup now</button>
+            </div>
+            <div id="dbbackup-list" style="margin-top:10px;font-size:var(--fs-xs);color:var(--muted)"></div>
+        </div>
+
     </div>
 
     <!-- ── System Info ────────────────────────────────────────── -->
@@ -567,6 +579,43 @@ async function startDbClean() {
 function cancelDbClean() {
     fetch('/db/clean-cancel', { method: 'POST' });
 }
+
+// ── DB Backup ─────────────────────────────────────────────────
+function _fmtBackupSize(n) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(1) + ' ' + units[i];
+}
+
+async function loadDbBackups() {
+    const r = await fetch('/db/backups');
+    if (!r.ok) return;
+    const data = await r.json();
+    const list = document.getElementById('dbbackup-list');
+    if (!data.backups.length) { list.textContent = 'No backups yet.'; return; }
+    list.innerHTML = data.backups.map(b =>
+        `<div>${b.name} · ${_fmtBackupSize(b.size)} · ${new Date(b.mtime * 1000).toLocaleString()}</div>`
+    ).join('');
+}
+
+async function runDbBackup() {
+    const btn = document.getElementById('dbbackup-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Backing up…';
+    try {
+        const r = await fetch('/db/backup', { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        await loadDbBackups();
+    } catch (e) {
+        alert('Backup failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '⤓ Backup now';
+    }
+}
+
+loadDbBackups();
 
 (async () => {
     try {

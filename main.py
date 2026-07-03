@@ -4154,6 +4154,62 @@ async def db_clean_status():
     return _dbclean_progress
 
 
+_DB_BACKUP_KEEP = 5
+
+
+def _backup_db_sync(max_keep: int = _DB_BACKUP_KEEP) -> dict:
+    """Online-copy DB_PATH (via sqlite3's backup API, safe against concurrent
+    writers) into a timestamped file next to it, keeping only the most
+    recent max_keep backups."""
+    import sqlite3 as _sq3
+
+    backup_dir = Path(DB_PATH).parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    # Microsecond resolution so two backups requested in quick succession
+    # (e.g. in a test, or a fast double-click) never collide on filename.
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    dest = backup_dir / f"mediastat-{ts}.db"
+
+    src_conn = _sq3.connect(DB_PATH)
+    try:
+        dest_conn = _sq3.connect(str(dest))
+        try:
+            src_conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+    finally:
+        src_conn.close()
+
+    backups = sorted(backup_dir.glob("mediastat-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in backups[max_keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    return {"path": str(dest), "size": dest.stat().st_size}
+
+
+@app.post("/db/backup")
+async def db_backup():
+    """Snapshot mediastat.db (IMDb/TMDB match state, encode job history) —
+    cheap insurance against a corrupted DB or a bad update, since redoing an
+    IMDb scan from scratch can take a long time."""
+    return await asyncio.to_thread(_backup_db_sync)
+
+
+@app.get("/db/backups")
+async def list_db_backups():
+    backup_dir = Path(DB_PATH).parent / "backups"
+    if not backup_dir.exists():
+        return {"backups": []}
+    backups = sorted(backup_dir.glob("mediastat-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"backups": [
+        {"name": p.name, "size": p.stat().st_size, "mtime": p.stat().st_mtime}
+        for p in backups
+    ]}
+
+
 @app.get("/db/stats")
 async def db_stats():
     import os
