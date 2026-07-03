@@ -4756,11 +4756,14 @@ async def reorder_encode(job_id: str, request: Request):
 
 @app.get("/encode/active-count")
 async def encode_active_count():
-    """Cheap in-memory count of running/queued jobs, for a live badge on
-    pages that aren't the jobs page itself (no need to open an SSE
-    connection or hit the DB just to show a number)."""
-    count = sum(1 for j in _encode_jobs.values() if j.status in ("running", "queued"))
-    return {"count": count}
+    """Cheap in-memory count + aggregate progress of running/queued jobs,
+    for a live badge on pages that aren't the jobs page itself (no need to
+    open an SSE connection or hit the DB just to show a number). avg_progress
+    is the mean of each active job's own 0-100 progress (queued jobs count
+    as 0) — a rough "how far through the current batch" indicator."""
+    active = [j for j in _encode_jobs.values() if j.status in ("running", "queued")]
+    avg_progress = (sum(j.progress for j in active) / len(active)) if active else None
+    return {"count": len(active), "avg_progress": avg_progress}
 
 
 @app.get("/encode/stats")

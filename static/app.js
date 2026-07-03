@@ -1807,22 +1807,32 @@
     loadDirSizes(document);
     loadFolderHeader();
 
-    // ── Live encode job-count badge on the Jobs link ───────────────
+    // ── Live encode job-count badge + progress fill on the Jobs link ───
     // Only present on pages with the Jobs nav button (index.html).
     if (document.getElementById('encode-jobs-count')) {
         const _refreshJobsBadge = () => {
             fetch('/encode/active-count')
-                .then(r => r.ok ? r.json() : { count: 0 })
+                .then(r => r.ok ? r.json() : { count: 0, avg_progress: null })
                 .then(d => {
                     const badge = document.getElementById('encode-jobs-count');
-                    if (!badge) return;
-                    if (d.count > 0) { badge.textContent = d.count; badge.style.display = ''; }
-                    else badge.style.display = 'none';
+                    const dot   = document.getElementById('encode-jobs-dot');
+                    const fill  = document.getElementById('encode-jobs-fill');
+                    if (!badge || !dot || !fill) return;
+                    if (d.count > 0) {
+                        badge.textContent = d.count;
+                        badge.style.display = '';
+                        dot.style.display = 'inline-block';
+                        fill.style.width = (d.avg_progress != null ? d.avg_progress : 0) + '%';
+                    } else {
+                        badge.style.display = 'none';
+                        dot.style.display = 'none';
+                        fill.style.width = '0%';
+                    }
                 })
                 .catch(() => {});
         };
         _refreshJobsBadge();
-        setInterval(_refreshJobsBadge, 20000);
+        setInterval(_refreshJobsBadge, 5000);
     }
 
     // ── Folder header ─────────────────────────────────────────────

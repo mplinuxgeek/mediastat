@@ -46,7 +46,13 @@
                 onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
             ↺ Rescan
         </button>
-        <a href="{{ ingress_path }}/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none">⚙ Jobs<span id="encode-jobs-count" style="display:none;margin-left:5px;font-size:11px;background:var(--accent);color:var(--bg);border-radius:8px;padding:0 6px"></span></a>
+        <a href="{{ ingress_path }}/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none;position:relative;overflow:hidden">
+            <span id="encode-jobs-fill" style="position:absolute;left:0;top:0;bottom:0;width:0%;background:color-mix(in srgb, var(--accent) 25%, transparent);transition:width 1s linear;z-index:0"></span>
+            <span style="position:relative;z-index:1;display:inline-flex;align-items:center;gap:5px">
+                <span id="encode-jobs-dot" style="display:none;width:7px;height:7px;border-radius:50%;background:var(--accent);animation:ms-pulse 1.4s ease-in-out infinite"></span>
+                ⚙ Jobs<span id="encode-jobs-count" style="display:none;margin-left:2px;font-size:11px;background:var(--accent);color:var(--bg);border-radius:8px;padding:0 6px"></span>
+            </span>
+        </a>
         <a href="{{ ingress_path }}/imdb-scan" class="btn" title="IMDb background scan" style="margin-left:auto;text-decoration:none">⬡ IMDb</a>
         <a href="{{ ingress_path }}/databases" class="btn" title="Databases &amp; system info" style="text-decoration:none">⬡ DB</a>
     </header>

@@ -253,6 +253,13 @@
             font-size: var(--fs-sm);
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes ms-pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.35; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #encode-jobs-dot { animation: none; }
+        }
         .root-loading::before {
             content: "";
             display: inline-block;
