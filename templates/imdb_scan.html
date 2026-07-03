@@ -203,6 +203,9 @@
         <div class="review-header">
             <span class="review-title">Needs Review</span>
             <span class="review-count" id="review-count"></span>
+            <button class="btn" id="bulk-accept-btn" onclick="bulkAcceptSingleCandidates()"
+                    title="Accept the match for every item that has exactly one candidate result — genuinely ambiguous items (multiple candidates) are left for manual review"
+                    style="margin-left:auto">✓ Accept single-candidate matches</button>
         </div>
         <div id="review-list"></div>
     </div>
@@ -408,6 +411,25 @@ async function selectMatch(btn) {
     });
     item.classList.add('resolved');
     setTimeout(() => { item.remove(); _setReviewFocus(_reviewFocusIdx); }, 800);
+}
+
+// Items with exactly one candidate result weren't auto-matched only because
+// of something like a missing year in the filename, not real ambiguity —
+// items with multiple results are genuinely ambiguous and stay untouched.
+async function bulkAcceptSingleCandidates() {
+    const items = [...document.querySelectorAll('#review-list .review-item:not(.resolved)')];
+    const targets = items.filter(item => item.querySelectorAll('.result-btn').length === 1);
+    if (!targets.length) {
+        alert('No single-candidate items to accept right now — everything left needs manual review.');
+        return;
+    }
+    const btn = document.getElementById('bulk-accept-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = `Accepting ${targets.length}…`;
+    await Promise.all(targets.map(item => selectMatch(item.querySelector('.result-btn'))));
+    btn.disabled = false;
+    btn.textContent = original;
 }
 
 function skipReview(btn) {
