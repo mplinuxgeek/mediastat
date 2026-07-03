@@ -1752,6 +1752,7 @@
     document.body.addEventListener('htmx:afterSwap', () => {
         const activeBtn = document.querySelector('#global-sort-bar .sort-btn.active');
         if (activeBtn) _applySort(activeBtn.dataset.sort);
+        _applyWatchBadges();
     });
 
     // Kick off scans/checks for placeholders on initial page load
@@ -2152,6 +2153,8 @@
         document.getElementById('transcode-btn').classList.toggle('active', _transcodeActive);
         document.getElementById('player-modal').style.display = 'flex';
         _loadPlayerSrc(_playerResumePos(_playerPath));
+        _recordLastPlayed(_playerPath);
+        _updateWatchedBtn();
     }
 
     function toggleTranscode() {
@@ -2170,6 +2173,78 @@
             if (Date.now() - saved > 30 * 86400 * 1000) { localStorage.removeItem('ms_pos_' + btoa(path)); return 0; }
             return t || 0;
         } catch { return 0; }
+    }
+
+    // ── Lightweight watch tracking (localStorage, no backend) ──────
+    const _WATCH_HISTORY_KEY = 'mediastat_watch_history';
+
+    function _loadWatchHistory() {
+        try {
+            const raw = localStorage.getItem(_WATCH_HISTORY_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) { return {}; }
+    }
+
+    function _saveWatchEntry(path, updates) {
+        try {
+            const all = _loadWatchHistory();
+            all[path] = { ...(all[path] || {}), ...updates };
+            localStorage.setItem(_WATCH_HISTORY_KEY, JSON.stringify(all));
+        } catch (e) { /* localStorage unavailable — just skip remembering */ }
+        _applyWatchBadges();
+    }
+
+    function _recordLastPlayed(path) {
+        _saveWatchEntry(path, { lastPlayed: Date.now() });
+    }
+
+    function toggleWatched() {
+        if (!_playerPath) return;
+        const current = _loadWatchHistory()[_playerPath] || {};
+        _saveWatchEntry(_playerPath, { watched: !current.watched });
+        _updateWatchedBtn();
+    }
+
+    function _updateWatchedBtn() {
+        const btn = document.getElementById('watched-btn');
+        if (!btn || !_playerPath) return;
+        const watched = !!(_loadWatchHistory()[_playerPath] || {}).watched;
+        btn.classList.toggle('active', watched);
+        btn.textContent = watched ? '👁 Watched' : '👁 Mark watched';
+    }
+
+    function _fmtRelativeTime(ms) {
+        const days = Math.floor((Date.now() - ms) / 86400000);
+        if (days <= 0) return 'today';
+        if (days === 1) return 'yesterday';
+        if (days < 30) return `${days}d ago`;
+        const months = Math.floor(days / 30);
+        return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`;
+    }
+
+    // Decorate each visible file row with a small watched/last-played badge.
+    // Re-run after htmx loads new rows (see htmx:afterSwap listener) since
+    // watch state lives client-side and rows are rendered server-side.
+    function _applyWatchBadges() {
+        const history = _loadWatchHistory();
+        document.querySelectorAll('.file-entry[data-path]').forEach(entry => {
+            const info = history[entry.dataset.path];
+            let badge = entry.querySelector('.watch-badge');
+            if (!info || (!info.watched && !info.lastPlayed)) {
+                if (badge) badge.remove();
+                return;
+            }
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'watch-badge';
+                badge.style.cssText = 'font-size:var(--fs-xs);color:var(--muted);margin-left:6px';
+                const nameCell = entry.querySelector('.file-name-cell');
+                if (nameCell) nameCell.appendChild(badge);
+            }
+            badge.textContent = info.watched
+                ? '✓ watched'
+                : (info.lastPlayed ? `▶ ${_fmtRelativeTime(info.lastPlayed)}` : '');
+        });
     }
 
     function closePlayer() {

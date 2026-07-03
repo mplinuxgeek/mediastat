@@ -14,6 +14,7 @@
                 <span id="player-title" class="player-title"></span>
                 <span id="player-codec" class="player-codec"></span>
                 <button id="transcode-btn" class="btn player-transcode-btn" onclick="toggleTranscode()" title="Re-encode to HLS for browser compatibility — use if video or audio won't play">⚡ HLS stream</button>
+                <button id="watched-btn" class="btn" onclick="toggleWatched()" title="Mark this file watched/unwatched">👁 Watched</button>
                 <button class="player-close" onclick="closePlayer()" title="Close player">✕</button>
             </div>
             <video id="player-video" controls preload="metadata"></video>
