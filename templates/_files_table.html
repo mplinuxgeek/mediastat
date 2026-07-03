@@ -2,6 +2,8 @@
 <div class="files-table">
 {% for file in files %}
 <div class="file-entry"
+     draggable="true"
+     ondragstart="_onFileDragStart(event, this)"
      onclick="if(typeof _batchMode!='undefined'&&_batchMode){const cb=this.querySelector('.batch-cb');if(cb){cb.checked=!cb.checked;updateBatchFab();}}"
      data-name="{{ file.name | lower }}"
      data-size="{{ file.size }}"

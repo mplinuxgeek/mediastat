@@ -581,6 +581,69 @@
         setTimeout(() => location.reload(), 800);
     }
 
+    // ── Drag-and-drop batch move onto the directory tree ───────────
+    // /move-to-folder always moves into a subfolder of the dragged file's OWN
+    // current directory (dest = src.parent / folder_name) — it can't move a
+    // file into an arbitrary directory elsewhere in the tree. So a drop is
+    // only accepted onto a subfolder that's a visible sibling of the file in
+    // the same .dir-block; anything else would silently do the wrong thing
+    // (create/use a same-named folder under the file's own directory instead
+    // of actually moving it into the folder that was visually dropped on).
+    function _onFileDragStart(event, el) {
+        const checked = [...document.querySelectorAll('.batch-cb:checked')];
+        const paths = checked.length && el.querySelector('.batch-cb')?.checked
+            ? checked.map(cb => cb.closest('.file-entry')?.dataset.path).filter(Boolean)
+            : [el.dataset.path];
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('application/json', JSON.stringify(paths));
+        event.dataTransfer.setData('text/plain', paths.join('\n'));
+    }
+
+    function _onDirDragOver(event, el) {
+        if (!event.dataTransfer.types.includes('application/json')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        el.classList.add('drop-target');
+    }
+
+    function _onDirDragLeave(event, el) {
+        el.classList.remove('drop-target');
+    }
+
+    async function _onDirDrop(event, el) {
+        event.preventDefault();
+        el.classList.remove('drop-target');
+        let paths;
+        try { paths = JSON.parse(event.dataTransfer.getData('application/json')); }
+        catch (e) { return; }
+        if (!paths || !paths.length) return;
+
+        const sameDirBlock = paths.every(p => {
+            const row = document.querySelector(`.file-entry[data-path="${CSS.escape(p)}"]`);
+            return row && row.closest('.dir-block') === el.closest('.dir-block');
+        });
+        if (!sameDirBlock) {
+            showToast("Can only drop onto a subfolder shown under the file's own directory", 'error');
+            return;
+        }
+
+        const folderName = el.dataset.dirName;
+        const resp = await fetch('/move-to-folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+            body: JSON.stringify({ paths, folder: folderName }),
+        });
+        const result = await resp.json();
+        if (!resp.ok) { showToast('Move failed: ' + (result.detail || resp.status), 'error'); return; }
+        const moved = result.moved?.length ?? 0;
+        const failed = result.errors?.length ?? 0;
+        showToast(
+            moved ? `${moved} file${moved !== 1 ? 's' : ''} moved to "${escHtml(folderName)}"${failed ? ` · ${failed} failed` : ''}` : 'Move failed',
+            moved ? 'success' : 'error', 5000
+        );
+        setTimeout(() => location.reload(), 800);
+    }
+
     // ── Bulk delete ──────────────────────────────────────────────
     let _batchDeleteRows = [];
 

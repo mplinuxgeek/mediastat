@@ -148,6 +148,10 @@
         }
         details.dir-entry > summary:hover { background: var(--surface2); }
         details.dir-entry > summary::-webkit-details-marker { display: none; }
+        details.dir-entry.drop-target > summary {
+            background: color-mix(in srgb, var(--accent) 20%, transparent);
+            outline: 1px dashed var(--accent);
+        }
 
         .chevron {
             display: inline-block;
