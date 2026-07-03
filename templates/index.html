@@ -39,6 +39,7 @@
         <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
         <button class="btn" onclick="openHealthModal()" title="Health check — scan all files for issues">✦ health</button>
         <button class="btn" id="batch-toggle-btn" onclick="toggleBatchMode()" title="Select files for batch encode">☐ select</button>
+        <button class="btn" id="select-all-visible-btn" onclick="selectAllVisible()" title="Select every file currently visible after filtering (shift-click a checkbox to select a range)">☑ select all visible</button>
         <button class="btn" title="Clear cached metadata and re-scan all files"
                 onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
             ↺ Rescan

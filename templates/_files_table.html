@@ -16,7 +16,7 @@
      data-duration="{{ file.duration_sec or file.duration_min or '' }}"
      data-hdr="{{ file.hdr_type or 'SDR' }}">
     <span class="batch-checkbox-cell">
-        <input type="checkbox" class="batch-cb" onclick="event.stopPropagation();updateBatchFab()">
+        <input type="checkbox" class="batch-cb" onclick="batchCbClick(event, this)">
     </span>
     <span class="file-name-cell">
         <button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span> <span class="tag imdb-rating-badge" style="display:none"></span>

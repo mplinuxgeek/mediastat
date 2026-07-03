@@ -882,6 +882,8 @@
         body.batch-mode .batch-checkbox-cell { display: table-cell; }
         body.batch-mode .file-entry { cursor: pointer; }
         body.batch-mode .file-entry:hover .batch-checkbox-cell { opacity: 1; }
+        #select-all-visible-btn { display: none; }
+        body.batch-mode #select-all-visible-btn { display: inline-block; }
         .batch-checkbox-cell input { accent-color: var(--accent); cursor: pointer; }
         .batch-fab {
             position: fixed; bottom: 24px; right: 24px;

@@ -292,6 +292,37 @@
         document.getElementById('batch-move-fab').classList.toggle('visible', count > 0);
     }
 
+    // Shift-click a checkbox to select every checkbox between it and the last
+    // one clicked (in visual/DOM order), skipping rows hidden by a filter.
+    let _lastCheckedCb = null;
+
+    function batchCbClick(event, cb) {
+        event.stopPropagation();
+        if (event.shiftKey && _lastCheckedCb) {
+            const all = [...document.querySelectorAll('.batch-cb')];
+            const a = all.indexOf(_lastCheckedCb);
+            const b = all.indexOf(cb);
+            if (a !== -1 && b !== -1) {
+                const [start, end] = a < b ? [a, b] : [b, a];
+                for (let i = start; i <= end; i++) {
+                    const entry = all[i].closest('.file-entry');
+                    if (entry && entry.style.display !== 'none') all[i].checked = cb.checked;
+                }
+            }
+        }
+        _lastCheckedCb = cb;
+        updateBatchFab();
+    }
+
+    function selectAllVisible() {
+        document.querySelectorAll('.file-entry').forEach(entry => {
+            if (entry.style.display === 'none') return;
+            const cb = entry.querySelector('.batch-cb');
+            if (cb) cb.checked = true;
+        });
+        updateBatchFab();
+    }
+
     async function startBatchEncode() {
         const checked = [...document.querySelectorAll('.batch-cb:checked')];
         if (!checked.length) return;
