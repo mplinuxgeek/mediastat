@@ -12,9 +12,25 @@ CONTAINER_NAME="mediastat-local"
 # ./run.sh --rollback — skip the build entirely and recreate the container
 # from the image tagged :prev (the one running before the last rebuild),
 # for when a rebuild turns out bad. Only one rollback level is kept.
+#
+# ./run.sh --update — pull the latest commit before rebuilding, turning
+# "update mediastat" into one command. Skipped (with a warning) if the
+# working tree has uncommitted changes, rather than risking a pull that
+# conflicts with in-progress local edits.
 ROLLBACK=false
-if [ "${1:-}" = "--rollback" ]; then
-    ROLLBACK=true
+UPDATE=false
+case "${1:-}" in
+    --rollback) ROLLBACK=true ;;
+    --update)   UPDATE=true ;;
+esac
+
+if [ "${UPDATE}" = true ]; then
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Working tree has uncommitted changes — skipping git pull. Commit/stash first, or run ./run.sh without --update to rebuild as-is." >&2
+    else
+        echo "Pulling latest commit..."
+        git pull --ff-only
+    fi
 fi
 
 UID_=$(id -u)
@@ -84,4 +100,5 @@ docker run -d \
         --proxy-headers --forwarded-allow-ips '*'
 
 echo "mediastat-local up on :8081. logs: docker logs -f ${CONTAINER_NAME}"
+echo "update to the latest commit + rebuild + restart: ./run.sh --update"
 echo "roll back a bad update with: ./run.sh --rollback"
