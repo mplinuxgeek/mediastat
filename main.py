@@ -4683,6 +4683,15 @@ async def reorder_encode(job_id: str, request: Request):
     return Response(status_code=204)
 
 
+@app.get("/encode/active-count")
+async def encode_active_count():
+    """Cheap in-memory count of running/queued jobs, for a live badge on
+    pages that aren't the jobs page itself (no need to open an SSE
+    connection or hit the DB just to show a number)."""
+    count = sum(1 for j in _encode_jobs.values() if j.status in ("running", "queued"))
+    return {"count": count}
+
+
 @app.get("/encode/stats")
 async def encode_stats():
     """Aggregate statistics for all encode jobs in the DB."""

@@ -1607,6 +1607,24 @@
     loadDirSizes(document);
     loadFolderHeader();
 
+    // ── Live encode job-count badge on the Jobs link ───────────────
+    // Only present on pages with the Jobs nav button (index.html).
+    if (document.getElementById('encode-jobs-count')) {
+        const _refreshJobsBadge = () => {
+            fetch('/encode/active-count')
+                .then(r => r.ok ? r.json() : { count: 0 })
+                .then(d => {
+                    const badge = document.getElementById('encode-jobs-count');
+                    if (!badge) return;
+                    if (d.count > 0) { badge.textContent = d.count; badge.style.display = ''; }
+                    else badge.style.display = 'none';
+                })
+                .catch(() => {});
+        };
+        _refreshJobsBadge();
+        setInterval(_refreshJobsBadge, 20000);
+    }
+
     // ── Folder header ─────────────────────────────────────────────
     async function loadFolderHeader() {
         const root = MEDIA_ROOT;
