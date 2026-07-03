@@ -364,8 +364,16 @@ async function selectMatch(btn) {
 
 function skipReview(btn) {
     const item = btn.closest('.review-item');
+    const path = item.dataset.path;
     item.classList.add('resolved');
     setTimeout(() => item.remove(), 400);
+    // Persist the skip so it survives a restart — it may still reappear on
+    // the next scan if the file remains unmatched, same as before.
+    fetch(BASE_PATH + '/imdb/scan-review/skip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+        body: JSON.stringify({ path }),
+    });
 }
 
 // On load: restore status

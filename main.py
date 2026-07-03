@@ -482,6 +482,20 @@ def _imdbscan_thread(force_rescan: bool, skip_manual: bool) -> None:
                         log.warning("imdbscan write: %s", exc)
                         _imdbscan_progress["skipped"] += 1
 
+        if not cancelled:
+            # Persist the review queue so it survives a restart and isn't lost
+            # if no one gets to it before the next scan runs — replaces the
+            # whole table since this scan's list supersedes any prior one.
+            now = time.time()
+            app_conn.execute("DELETE FROM imdb_review_queue")
+            app_conn.executemany(
+                "INSERT INTO imdb_review_queue (path, filename, reason, results_json, created_at) "
+                "VALUES (?,?,?,?,?)",
+                [(it["path"], it["filename"], it["reason"], json.dumps(it["results"]), now)
+                 for it in review_items],
+            )
+            app_conn.commit()
+
         app_conn.close()
         imdb_conn.close()
 
@@ -572,6 +586,19 @@ async def _init_imdb():
                 await db.execute(f"ALTER TABLE file_imdb ADD COLUMN {col} {defn}")
             except Exception:
                 pass  # column already exists
+        # Ambiguous-match review queue from the last completed scan — persisted
+        # so it survives a restart instead of only living in the in-memory
+        # progress dict, and so it isn't silently lost if the next scan hasn't
+        # run yet.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS imdb_review_queue (
+                path         TEXT PRIMARY KEY,
+                filename     TEXT,
+                reason       TEXT,
+                results_json TEXT,
+                created_at   REAL
+            )
+        """)
         await db.commit()
 
 
@@ -1364,6 +1391,7 @@ async def imdb_match(request: Request):
             (path, tconst, body.get("primary_title"), body.get("start_year"),
              body.get("genres"), body.get("runtime_minutes"), source, release_date, rating)
         )
+        await db.execute("DELETE FROM imdb_review_queue WHERE path = ?", (path,))
         await db.commit()
     # Optionally set file mtime in the same request, avoiding a second round-trip
     if body.get("set_dates"):
@@ -1646,7 +1674,38 @@ async def imdb_scan_status():
 
 @app.get("/imdb/scan-review")
 async def imdb_scan_review():
-    return _imdbscan_progress.get("review", [])
+    """Persisted review queue from the last completed scan — survives a
+    restart, unlike the in-memory progress dict this used to read from."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT path, filename, reason, results_json FROM imdb_review_queue ORDER BY created_at"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"path": r["path"], "filename": r["filename"], "reason": r["reason"],
+         "results": json.loads(r["results_json"])}
+        for r in rows
+    ]
+
+
+@app.post("/imdb/scan-review/skip")
+async def imdb_scan_review_skip(request: Request):
+    """Dismiss one review item without matching it. It may reappear on the
+    next scan if the file is still unmatched — this only removes it now."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM imdb_review_queue WHERE path = ?", (path,))
+        await db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/imdb/matches")
