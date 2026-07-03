@@ -113,6 +113,12 @@
             border-radius: 8px; padding: 12px 14px; margin-bottom: 10px;
         }
         .review-item.resolved { opacity: 0.4; }
+        .review-item.focused { border-color: var(--accent); }
+        .result-num {
+            display: inline-block; font-size: 10px; color: var(--muted);
+            border: 1px solid var(--border); border-radius: 3px;
+            padding: 0 4px; margin-right: 4px; align-self: flex-start;
+        }
         .review-filename { font-size: var(--fs-sm); color: var(--text); margin-bottom: 2px;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .review-reason { font-size: var(--fs-xs); color: var(--muted); margin-bottom: 8px; }
@@ -303,23 +309,65 @@ async function loadReview() {
     document.getElementById('review-count').textContent = items.length + ' file' + (items.length===1?'':'s');
     document.getElementById('review-section').style.display = '';
     for (const item of items) renderReviewItem(item, list);
+    _setReviewFocus(0);
 }
+
+// ── Keyboard shortcuts: j/k or ↓/↑ to move between review items,
+// 1-9 to pick a numbered result, s to skip — mirrors the main browser's nav.
+let _reviewFocusIdx = 0;
+
+function _reviewItems() {
+    return [...document.querySelectorAll('#review-list .review-item')];
+}
+
+function _setReviewFocus(idx) {
+    const items = _reviewItems();
+    if (!items.length) return;
+    _reviewFocusIdx = Math.max(0, Math.min(idx, items.length - 1));
+    items.forEach((el, i) => el.classList.toggle('focused', i === _reviewFocusIdx));
+    items[_reviewFocusIdx].scrollIntoView({ block: 'nearest' });
+}
+
+document.addEventListener('keydown', (e) => {
+    if (document.getElementById('review-section').style.display === 'none') return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+    const items = _reviewItems();
+    if (!items.length) return;
+
+    if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        _setReviewFocus(_reviewFocusIdx + 1);
+    } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        _setReviewFocus(_reviewFocusIdx - 1);
+    } else if (e.key === 's' || e.key === 'S') {
+        const btn = items[_reviewFocusIdx]?.querySelector('.skip-btn');
+        if (btn) btn.click();
+    } else if (/^[1-9]$/.test(e.key)) {
+        const resultBtns = items[_reviewFocusIdx]?.querySelectorAll('.result-btn') || [];
+        const n = parseInt(e.key, 10);
+        if (resultBtns[n - 1]) resultBtns[n - 1].click();
+    }
+});
 
 function renderReviewItem(item, container) {
     const div = document.createElement('div');
     div.className = 'review-item';
     div.dataset.path = item.path;
 
-    const resultsHtml = (item.results || []).map(r => {
+    const resultsHtml = (item.results || []).map((r, i) => {
         const rating = r.average_rating ? `<span class="result-rating">★${r.average_rating}</span>` : '';
         const meta   = [r.start_year, r.runtime_minutes ? r.runtime_minutes+'m' : null, r.title_type]
                           .filter(Boolean).join(' · ');
+        const numBadge = i < 9 ? `<span class="result-num" title="Press ${i+1} to pick">${i+1}</span>` : '';
         return `<button class="result-btn" data-tconst="${r.tconst}"
                     data-title="${esc(r.primary_title)}" data-year="${r.start_year||''}"
                     data-genres="${esc(r.genres||'')}" data-runtime="${r.runtime_minutes||''}"
                     data-rating="${r.average_rating||''}"
                     onclick="selectMatch(this)"
-                  ><span class="result-title">${esc(r.primary_title)}</span
+                  >${numBadge}<span class="result-title">${esc(r.primary_title)}</span
                   ><span class="result-meta">${esc(meta)} ${rating}</span></button>`;
     }).join('');
 
@@ -359,14 +407,14 @@ async function selectMatch(btn) {
         }),
     });
     item.classList.add('resolved');
-    setTimeout(() => item.remove(), 800);
+    setTimeout(() => { item.remove(); _setReviewFocus(_reviewFocusIdx); }, 800);
 }
 
 function skipReview(btn) {
     const item = btn.closest('.review-item');
     const path = item.dataset.path;
     item.classList.add('resolved');
-    setTimeout(() => item.remove(), 400);
+    setTimeout(() => { item.remove(); _setReviewFocus(_reviewFocusIdx); }, 400);
     // Persist the skip so it survives a restart — it may still reappear on
     // the next scan if the file remains unmatched, same as before.
     fetch(BASE_PATH + '/imdb/scan-review/skip', {
