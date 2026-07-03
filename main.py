@@ -2814,9 +2814,16 @@ def _detect_hw_accel_sync() -> dict:
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=5,
             )
-            result["nvenc"] = r.returncode == 0 and bool(r.stdout.strip())
-        except Exception:
-            pass
+            gpu_name = r.stdout.strip()
+            result["nvenc"] = r.returncode == 0 and bool(gpu_name)
+            if result["nvenc"]:
+                log.info("nvidia-smi   : %s", gpu_name)
+            else:
+                err = (r.stderr or "").strip().splitlines()
+                log.warning("nvidia-smi   : found but returned no GPU (exit %d)%s",
+                            r.returncode, f" — {err[-1]}" if err else "")
+        except Exception as e:
+            log.warning("nvidia-smi   : probe failed (%s)", e)
     if result["nvenc"] and shutil.which("ffmpeg"):
         try:
             r = subprocess.run(
