@@ -284,5 +284,80 @@ class StartEstimateLockTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.exception.status_code, 409)
 
 
+class CancelEstimateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_during_qp_loop_stops_and_saves_partial_history(self):
+        calls = []
+
+        async def _fake_exec(*args, **kwargs):
+            calls.append(args)
+            proc = unittest.mock.AsyncMock()
+            argv = args
+            if argv[0] == "ffprobe":
+                proc.communicate = unittest.mock.AsyncMock(return_value=(_fake_probe_json(), b""))
+                proc.returncode = 0
+            elif "-lavfi" in argv:  # ssim pass
+                proc.communicate = unittest.mock.AsyncMock(
+                    return_value=(b"", b"SSIM Y:0.99 U:0.99 V:0.99 All:0.990000 (20.0)\n"))
+                proc.returncode = 0
+            elif "-progress" in argv:  # qp encode
+                out_path = argv[-1]
+                with open(out_path, "wb") as f:
+                    f.write(b"0" * 1000)
+                proc.stdout = _FakeProgressStdout(b"out_time_us=60000000\nfps=25.0\nprogress=end\n")
+                proc.stderr = _EmptyAsyncIter()
+                proc.wait = unittest.mock.AsyncMock(return_value=0)
+                proc.returncode = 0
+                # Second QP pass (qp=17) is where the cancel request lands.
+                if len([a for a in calls if "-progress" in a]) == 2:
+                    main._estimate_cancel_event.set()
+            else:  # sample extraction
+                out_path = argv[-1]
+                with open(out_path, "wb") as f:
+                    f.write(b"0" * 1000)
+                proc.communicate = unittest.mock.AsyncMock(return_value=(b"", b""))
+                proc.returncode = 0
+            return proc
+
+        main._hw_accel_info = {"qsv": False, "nvenc": False, "vaapi": False, "amd": False, "dri_device": ""}
+        with unittest.mock.patch.object(asyncio, "create_subprocess_exec", side_effect=_fake_exec), \
+             unittest.mock.patch("main.Path.stat") as mock_stat, \
+             unittest.mock.patch("main.Path.exists", return_value=True):
+            mock_stat.return_value = unittest.mock.Mock(st_size=1000)
+            await main._run_estimate("/tmp/does-not-exist.mkv", main._make_encode_config({}))
+
+        self.assertEqual(main._estimate_state["status"], "cancelled")
+        # QP 16 finished before cancel; QP 17's in-flight pass is cut short so
+        # it never gets appended to results.
+        self.assertEqual(len(main._estimate_state["results"]), 1)
+        self.assertEqual(main._estimate_state["results"][0]["qp"], 16)
+
+        cached = main._estimate_history.get("/tmp/does-not-exist.mkv")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["status"], "cancelled")
+        self.assertEqual(len(cached["results"]), 1)
+
+    async def test_cancel_endpoint_returns_not_running_when_idle(self):
+        main._estimate_state = {"status": "idle", "results": [], "suggested_qp": None,
+                                 "warning": None, "error": None, "current_qp": None}
+        result = await main.cancel_estimate()
+        self.assertEqual(result, {"error": "Not running"})
+
+    async def test_cancel_endpoint_sets_event_and_kills_proc_when_running(self):
+        main._estimate_state = {"status": "encoding", "results": [], "suggested_qp": None,
+                                 "warning": None, "error": None, "current_qp": 18}
+        main._estimate_cancel_event.clear()
+        fake_proc = unittest.mock.Mock()
+        fake_proc.returncode = None
+        main._estimate_proc = fake_proc
+        try:
+            result = await main.cancel_estimate()
+            self.assertEqual(result, {"cancelling": True})
+            self.assertTrue(main._estimate_cancel_event.is_set())
+            fake_proc.kill.assert_called_once()
+        finally:
+            main._estimate_proc = None
+            main._estimate_cancel_event.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

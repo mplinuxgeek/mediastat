@@ -3362,6 +3362,9 @@ _estimate_subscribers: list[asyncio.Queue] = []
 _ESTIMATE_HISTORY_MAX = 5
 _estimate_history: "OrderedDict[str, dict]" = OrderedDict()
 
+_estimate_cancel_event = asyncio.Event()
+_estimate_proc: Optional[asyncio.subprocess.Process] = None
+
 
 def _save_estimate_history(history: "OrderedDict[str, dict]", path: str, state: dict, max_size: int) -> None:
     """Record a completed estimate's final state for `path`, evicting the
@@ -3389,8 +3392,17 @@ def _broadcast_estimate() -> None:
 
 
 async def _run_estimate(path: str, config: dict) -> None:
-    global _estimate_state
+    global _estimate_state, _estimate_proc
     tmp_dir: Optional[str] = None
+    _estimate_cancel_event.clear()
+
+    def _cancelled() -> bool:
+        if not _estimate_cancel_event.is_set():
+            return False
+        _estimate_state["status"] = "cancelled"
+        _broadcast_estimate()
+        return True
+
     try:
         _estimate_state = {"status": "probing", "results": [], "suggested_qp": None,
                             "warning": None, "error": None, "current_qp": None, "qp_progress": 0.0,
@@ -3399,6 +3411,8 @@ async def _run_estimate(path: str, config: dict) -> None:
 
         input_path = Path(path)
         info = await _probe_video(input_path)
+        if _cancelled():
+            return
 
         start, length = sample_window(info["duration_sec"], _ESTIMATE_SAMPLE_LENGTH)
 
@@ -3415,7 +3429,11 @@ async def _run_estimate(path: str, config: dict) -> None:
         proc = await asyncio.create_subprocess_exec(
             *extract_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
+        _estimate_proc = proc
         _, stderr = await proc.communicate()
+        _estimate_proc = None
+        if _cancelled():
+            return
         if proc.returncode != 0 or not sample_path.exists():
             raise RuntimeError(f"sample extraction failed: {stderr.decode(errors='replace')[-500:]}")
 
@@ -3425,10 +3443,15 @@ async def _run_estimate(path: str, config: dict) -> None:
         crop_filter = None
         if config.get("crop"):
             crop_filter = await _detect_crop(sample_path, length)
+        if _cancelled():
+            return
 
         width = config.get("width")
 
         for qp in _ESTIMATE_QPS:
+            if _cancelled():
+                return
+
             _estimate_state["status"] = "encoding"
             _estimate_state["current_qp"] = qp
             _estimate_state["qp_progress"] = 0.0
@@ -3448,6 +3471,7 @@ async def _run_estimate(path: str, config: dict) -> None:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
+            _estimate_proc = proc
             stderr_chunks: list[bytes] = []
 
             async def _drain_qp_stderr(p=proc):
@@ -3459,6 +3483,12 @@ async def _run_estimate(path: str, config: dict) -> None:
             last_broadcast = 0.0
             buf = ""
             while True:
+                if _estimate_cancel_event.is_set():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    break
                 chunk = await proc.stdout.read(512)
                 if not chunk:
                     break
@@ -3479,10 +3509,13 @@ async def _run_estimate(path: str, config: dict) -> None:
                             last_broadcast = now
 
             await proc.wait()
+            _estimate_proc = None
             try:
                 await asyncio.wait_for(stderr_task, timeout=2.0)
             except asyncio.TimeoutError:
                 pass
+            if _cancelled():
+                return
             stderr = b"".join(stderr_chunks)
             seconds = time.time() - t0
             if proc.returncode != 0 or not out_path.exists():
@@ -3499,7 +3532,9 @@ async def _run_estimate(path: str, config: dict) -> None:
             proc = await asyncio.create_subprocess_exec(
                 *ssim_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
+            _estimate_proc = proc
             _, ssim_stderr = await proc.communicate()
+            _estimate_proc = None
             ssim = parse_ssim(ssim_stderr.decode(errors="replace"))
 
             out_path.unlink(missing_ok=True)
@@ -3527,6 +3562,9 @@ async def _run_estimate(path: str, config: dict) -> None:
         _save_estimate_history(_estimate_history, path, _estimate_state, _ESTIMATE_HISTORY_MAX)
         log.warning("Estimate failed: %s", e)
     finally:
+        _estimate_proc = None
+        if _estimate_state.get("status") == "cancelled":
+            _save_estimate_history(_estimate_history, path, _estimate_state, _ESTIMATE_HISTORY_MAX)
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -4311,6 +4349,7 @@ async def start_estimate(request: Request, path: str = Query(...)):
     file_path = safe_path(path)
     if _estimate_state.get("status") in ("starting", "probing", "extracting", "encoding"):
         raise HTTPException(status_code=409, detail="An estimate is already running")
+    _estimate_cancel_event.clear()
     _estimate_state["status"] = "starting"
     if not file_path.is_file():
         _estimate_state["status"] = "idle"
@@ -4325,6 +4364,23 @@ async def start_estimate(request: Request, path: str = Query(...)):
     config = _make_encode_config({**body, "qp": 18})
     asyncio.create_task(_run_estimate(str(file_path), config))
     return {"status": "started"}
+
+
+@app.post("/encode/estimate/cancel")
+async def cancel_estimate():
+    """Ask a running QP sweep to stop at its next checkpoint, and kill
+    whatever ffmpeg process is currently in flight for an immediate stop —
+    otherwise the caller would have to wait for the current QP pass (or the
+    whole sweep) to finish naturally."""
+    if _estimate_state.get("status") not in ("starting", "probing", "extracting", "encoding"):
+        return {"error": "Not running"}
+    _estimate_cancel_event.set()
+    if _estimate_proc and _estimate_proc.returncode is None:
+        try:
+            _estimate_proc.kill()
+        except Exception:
+            pass
+    return {"cancelling": True}
 
 
 @app.get("/encode/estimate/history")
