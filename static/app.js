@@ -160,6 +160,40 @@
         _renderCustomPresetButtons();
         applyEncodePreset('quality');
         document.getElementById('encode-modal').style.display = 'flex';
+        document.getElementById('estimate-btn').disabled = false;
+        document.getElementById('estimate-stop-btn').style.display = 'none';
+        _loadEstimateForModal(path);
+    }
+
+    const _ESTIMATE_RUNNING_STATUSES = ['starting', 'probing', 'extracting', 'encoding'];
+
+    // Reopening the modal previously always showed a blank panel until a
+    // running estimate finished, even though the sweep kept running in the
+    // background — the only source consulted was the finished-only history
+    // endpoint. Check the live estimate state first so a run already in
+    // progress for this exact file reattaches immediately with current
+    // progress, instead of going dark until it completes.
+    async function _loadEstimateForModal(path) {
+        const panel = document.getElementById('estimate-panel');
+        panel.style.display = 'none';
+        document.getElementById('estimate-rows').innerHTML = '';
+        document.getElementById('estimate-summary').innerHTML = '';
+
+        try {
+            const liveResp = await fetch('/encode/estimate/state');
+            if (liveResp.ok) {
+                const live = await liveResp.json();
+                if (live.path === path && _ESTIMATE_RUNNING_STATUSES.includes(live.status)) {
+                    document.getElementById('estimate-status-line').textContent =
+                        'Sampling 60s from the middle of the file…';
+                    panel.style.display = 'block';
+                    _renderEstimateState(live);
+                    _attachEstimateSource();
+                    return;
+                }
+            }
+        } catch (e) { /* live-state check failed — fall through to history */ }
+
         _loadCachedEstimate(path);
     }
 
@@ -168,9 +202,6 @@
     // own last result, so switching files never loses another file's numbers.
     async function _loadCachedEstimate(path) {
         const panel = document.getElementById('estimate-panel');
-        panel.style.display = 'none';
-        document.getElementById('estimate-rows').innerHTML = '';
-        document.getElementById('estimate-summary').innerHTML = '';
         try {
             const resp = await fetch('/encode/estimate/history?path=' + encodeURIComponent(path));
             if (!resp.ok) return;
@@ -185,6 +216,7 @@
     }
     function closeEncodeModal() {
         document.getElementById('encode-modal').style.display = 'none';
+        if (_estimateSource) { _estimateSource.close(); _estimateSource = null; }
         // Restore original onclick if it was overridden by batch mode
         const btn = document.querySelector('#encode-modal .btn-primary');
         if (btn && btn._originalOnclick) { btn.onclick = btn._originalOnclick; btn._originalOnclick = null; }
@@ -311,11 +343,43 @@
         }
     }
 
+    // Wires a fresh EventSource to the live-estimate SSE stream, driving both
+    // the results panel and the Estimate/Stop button pair. Shared by
+    // startEstimate() (a run this tab just kicked off) and openEncodeModal()
+    // (reattaching to a run already in progress from a previous modal open).
+    function _attachEstimateSource() {
+        if (_estimateSource) _estimateSource.close();
+        document.getElementById('estimate-btn').disabled = true;
+        document.getElementById('estimate-stop-btn').style.display = 'inline-block';
+        _estimateSource = new EventSource('/encode/estimate/events');
+        _estimateSource.onmessage = (evt) => {
+            const msg = JSON.parse(evt.data);
+            if (msg.type !== 'state') return;
+            _renderEstimateState(msg.state);
+            if (msg.state.status === 'done' || msg.state.status === 'error' || msg.state.status === 'cancelled') {
+                document.getElementById('estimate-btn').disabled = false;
+                document.getElementById('estimate-stop-btn').style.display = 'none';
+                _estimateSource.close();
+                _estimateSource = null;
+            }
+        };
+    }
+
+    async function _stopEstimate() {
+        const btn = document.getElementById('estimate-stop-btn');
+        btn.disabled = true;
+        try {
+            await fetch('/encode/estimate/cancel', { method: 'POST' });
+        } catch (e) {
+            showToast('Error: ' + escHtml(e.message), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
     async function startEstimate() {
         const path = document.getElementById('encode-file-path').value;
         if (!path) return;
-        const btn = document.getElementById('estimate-btn');
-        btn.disabled = true;
         document.getElementById('estimate-panel').style.display = 'block';
         document.getElementById('estimate-status-line').textContent = 'Sampling 60s from the middle of the file…';
         document.getElementById('estimate-rows').innerHTML = '';
@@ -341,27 +405,14 @@
             if (!resp.ok) {
                 const txt = await resp.text();
                 showToast('Estimate failed: ' + escHtml(txt), 'error');
-                btn.disabled = false;
                 return;
             }
         } catch (e) {
             showToast('Error: ' + escHtml(e.message), 'error');
-            btn.disabled = false;
             return;
         }
 
-        if (_estimateSource) _estimateSource.close();
-        _estimateSource = new EventSource('/encode/estimate/events');
-        _estimateSource.onmessage = (evt) => {
-            const msg = JSON.parse(evt.data);
-            if (msg.type !== 'state') return;
-            _renderEstimateState(msg.state);
-            if (msg.state.status === 'done' || msg.state.status === 'error') {
-                btn.disabled = false;
-                _estimateSource.close();
-                _estimateSource = null;
-            }
-        };
+        _attachEstimateSource();
     }
 
     function _useEstimatedQp(qp) {

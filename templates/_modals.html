@@ -88,6 +88,8 @@
                     <input id="enc-qp" type="number" min="10" max="51" value="18" class="modal-input" style="width:72px">
                     <button id="estimate-btn" type="button" class="btn" style="padding:4px 10px;font-size:var(--fs-sm)"
                             onclick="startEstimate()" title="Encode a 60s sample from the middle at QP 16/18/20/22 and suggest a value">📈 Estimate</button>
+                    <button id="estimate-stop-btn" type="button" class="btn" style="padding:4px 10px;font-size:var(--fs-sm);display:none"
+                            onclick="_stopEstimate()" title="Stop the running QP sweep">⏹ Stop</button>
                 </div>
                 <span class="encode-field-hint">16 ≈ near-lossless · 18–20 high quality · 20–22 good · lower = better</span>
 
