@@ -4383,6 +4383,15 @@ async def cancel_estimate():
     return {"cancelling": True}
 
 
+@app.get("/encode/estimate/state")
+async def live_estimate_state():
+    """Return the in-memory state of whatever estimate is currently running
+    (or last ran), regardless of which file it's for — lets the frontend
+    check "is anything running, and for which path" independent of the
+    per-file finished-only history in `_estimate_history`."""
+    return _estimate_state
+
+
 @app.get("/encode/estimate/history")
 async def estimate_history(path: str = Query(...)):
     """Return the last completed estimate for `path`, if one is cached."""

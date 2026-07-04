@@ -63,5 +63,24 @@ class EstimateHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"status": "done", "suggested_qp": 18})
 
 
+class LiveEstimateStateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_current_live_state_regardless_of_status(self):
+        main._estimate_state = {
+            "status": "encoding", "results": [{"qp": 16, "bytes": 100}],
+            "suggested_qp": None, "warning": None, "error": None,
+            "current_qp": 17, "qp_progress": 42.0, "path": "/media/movie.mkv",
+        }
+        result = await main.live_estimate_state()
+        self.assertEqual(result["status"], "encoding")
+        self.assertEqual(result["path"], "/media/movie.mkv")
+        self.assertEqual(result["current_qp"], 17)
+
+    async def test_returns_idle_when_nothing_has_run(self):
+        main._estimate_state = {"status": "idle", "results": [], "suggested_qp": None,
+                                 "warning": None, "error": None, "current_qp": None}
+        result = await main.live_estimate_state()
+        self.assertEqual(result["status"], "idle")
+
+
 if __name__ == "__main__":
     unittest.main()
