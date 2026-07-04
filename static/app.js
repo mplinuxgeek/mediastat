@@ -184,6 +184,7 @@
             if (liveResp.ok) {
                 const live = await liveResp.json();
                 if (live.path === path && _ESTIMATE_RUNNING_STATUSES.includes(live.status)) {
+                    if (document.getElementById('encode-file-path').value !== path) return;
                     document.getElementById('estimate-status-line').textContent =
                         'Sampling 60s from the middle of the file…';
                     panel.style.display = 'block';

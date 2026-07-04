@@ -3394,7 +3394,6 @@ def _broadcast_estimate() -> None:
 async def _run_estimate(path: str, config: dict) -> None:
     global _estimate_state, _estimate_proc
     tmp_dir: Optional[str] = None
-    _estimate_cancel_event.clear()
 
     def _cancelled() -> bool:
         if not _estimate_cancel_event.is_set():
