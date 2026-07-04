@@ -306,6 +306,7 @@ class CancelEstimateTests(unittest.IsolatedAsyncioTestCase):
                 proc.stdout = _FakeProgressStdout(b"out_time_us=60000000\nfps=25.0\nprogress=end\n")
                 proc.stderr = _EmptyAsyncIter()
                 proc.wait = unittest.mock.AsyncMock(return_value=0)
+                proc.kill = unittest.mock.Mock()
                 proc.returncode = 0
                 # Second QP pass (qp=17) is where the cancel request lands.
                 if len([a for a in calls if "-progress" in a]) == 2:
