@@ -40,7 +40,7 @@ def build_ssim_ref_filter(crop_filter: str | None, width: int | None) -> str:
     return f"[1:v]{','.join(ref_ops)}[ref];[0:v][ref]ssim"
 
 
-def suggest_qp(results: list[dict], threshold: float = 0.98) -> tuple[int, str | None]:
+def suggest_qp(results: list[dict], threshold: float = 0.99) -> tuple[int, str | None]:
     """Pick the highest tested QP whose SSIM meets `threshold` (most
     compression while staying near-lossless). Falls back to the lowest
     tested QP with a warning if none qualify."""

@@ -3,7 +3,9 @@ set -e
 
 SMB_SERVER="192.168.1.50"
 SMB_SHARE="movies"
-HOST_MEDIA="/mnt/mediastat-movies"
+SMB_SHARE_TV="tv"
+HOST_MEDIA="/media/Movies"
+HOST_TV="/media/TV"
 HOST_DATA="/tmp/mediastat-data"
 HOST_CONFIG="${HOST_DATA}/config.yaml"
 IMAGE_TAG="mediastat-local"
@@ -38,6 +40,7 @@ GID_=$(id -g)
 
 mkdir -p "${HOST_DATA}"
 sudo mkdir -p "${HOST_MEDIA}"
+sudo mkdir -p "${HOST_TV}"
 
 # Mount the SMB share via the kernel (CIFS). Unlike GVFS this gives a normal
 # path with no funny characters and is readable by root, so Docker can bind-mount it.
@@ -47,11 +50,18 @@ if ! mountpoint -q "${HOST_MEDIA}"; then
         -o "guest,vers=3.0,uid=${UID_},gid=${GID_},rw,file_mode=0664,dir_mode=0775"
 fi
 
+if ! mountpoint -q "${HOST_TV}"; then
+    sudo mount -t cifs "//${SMB_SERVER}/${SMB_SHARE_TV}" "${HOST_TV}" \
+        -o "guest,vers=3.0,uid=${UID_},gid=${GID_},rw,file_mode=0664,dir_mode=0775"
+fi
+
 if [ ! -f "${HOST_CONFIG}" ]; then
     cat > "${HOST_CONFIG}" <<'EOF'
 directories:
   - label: "Movies"
     path: "/media/Movies"
+  - label: "TV"
+    path: "/media/TV"
 EOF
 fi
 
@@ -93,6 +103,7 @@ docker run -d \
     -e LIBVA_DRIVER_NAME=iHD \
     -v "${HOST_DATA}:/data" \
     -v "${HOST_MEDIA}:/media/Movies:rw" \
+    -v "${HOST_TV}:/media/TV:rw" \
     --device /dev/dri \
     --entrypoint /app/.venv/bin/uvicorn \
     "${IMAGE_TAG}" \

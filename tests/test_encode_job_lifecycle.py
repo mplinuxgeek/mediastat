@@ -116,6 +116,49 @@ class RetryDismissCancelSingleJobTests(unittest.IsolatedAsyncioTestCase):
             await main.dismiss_encode("nope", _FakeRequest(self.headers))
         self.assertEqual(ctx.exception.status_code, 404)
 
+    async def test_delete_output_unlinks_and_dismisses_job(self):
+        job = _make_job("d3", "done")
+        job.output_path = os.path.join(tempfile.gettempdir(), "test-d3-out.mkv")
+        with open(job.output_path, "wb") as f:
+            f.write(b"out")
+        self.assertTrue(os.path.exists(job.output_path))
+        main._encode_jobs["d3"] = job
+
+        await main.delete_encode_output("d3", _FakeRequest(self.headers))
+        self.assertNotIn("d3", main._encode_jobs)
+        self.assertFalse(os.path.exists(job.output_path))
+
+    async def test_delete_output_no_unlink_if_moved(self):
+        job = _make_job("d4", "done")
+        job.moved = True
+        job.output_path = os.path.join(tempfile.gettempdir(), "test-d4-out.mkv")
+        with open(job.output_path, "wb") as f:
+            f.write(b"out")
+        self.assertTrue(os.path.exists(job.output_path))
+        main._encode_jobs["d4"] = job
+
+        await main.delete_encode_output("d4", _FakeRequest(self.headers))
+        self.assertNotIn("d4", main._encode_jobs)
+        self.assertTrue(os.path.exists(job.output_path))
+        os.unlink(job.output_path)
+
+    async def test_delete_output_404_when_job_missing(self):
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.delete_encode_output("nope", _FakeRequest(self.headers))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_ffmpeg_cmd_save_and_load(self):
+        job = _make_job("d5", "done")
+        job.ffmpeg_cmd = "ffmpeg -y -i input.mkv -c:v libx265 output.mkv"
+        await main._save_encode_job(job)
+        
+        main._encode_jobs.clear()
+        await main._load_encode_jobs()
+        
+        restored = main._encode_jobs.get("d5")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.ffmpeg_cmd, "ffmpeg -y -i input.mkv -c:v libx265 output.mkv")
+
     async def test_all_require_delete_token(self):
         job = _make_job("x1", "failed")
         main._encode_jobs["x1"] = job
@@ -123,6 +166,7 @@ class RetryDismissCancelSingleJobTests(unittest.IsolatedAsyncioTestCase):
             main.retry_encode("x1", _FakeRequest({})),
             main.cancel_encode("x1", _FakeRequest({})),
             main.dismiss_encode("x1", _FakeRequest({})),
+            main.delete_encode_output("x1", _FakeRequest({})),
         ):
             with self.assertRaises(main.HTTPException) as ctx:
                 await coro

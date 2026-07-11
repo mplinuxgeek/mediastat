@@ -61,7 +61,7 @@
 
     <div id="delete-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeDeleteModal()">
         <div class="modal">
-            <div class="modal-title">Delete file?</div>
+            <div class="modal-title" id="modal-title-text">Delete file?</div>
             <div class="modal-filename" id="modal-filename"></div>
             <div class="modal-hint">Type <code>ok</code> to confirm</div>
             <input id="modal-input" class="modal-input" type="text" autocomplete="off" spellcheck="false">
@@ -145,6 +145,7 @@
                     <option value="hevc">H.265 / HEVC</option>
                     <option value="h264">H.264 / AVC</option>
                     <option value="av1">AV1</option>
+                    <option value="copy">Copy Mode (No Transcode)</option>
                 </select>
                 <span></span>
 

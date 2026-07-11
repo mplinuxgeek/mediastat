@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import copy
 import json
 import shutil
@@ -123,6 +124,7 @@ def _concurrency(key: str, default: int) -> int:
 _PROBE_SEM = asyncio.Semaphore(_concurrency("probe_workers", 8))   # max parallel ffprobe processes
 _DU_SEM    = asyncio.Semaphore(_concurrency("disk_usage_workers", 8))   # max parallel du processes
 _SCAN_SEM  = asyncio.Semaphore(_concurrency("scan_workers", 4))   # max in-flight scan tasks (DB conn + ffprobe)
+_STAT_SEM  = asyncio.Semaphore(_concurrency("stat_workers", 32))  # max parallel stat/db-check tasks
 IMDB_SEARCH_WORKERS = _concurrency("imdb_search_workers", 32)
 IMDB_MATCH_WRITE_WORKERS = _concurrency("imdb_match_write_workers", 16)
 
@@ -1817,9 +1819,15 @@ async def init_db():
                 started_at  REAL DEFAULT 0,
                 finished_at REAL,
                 error       TEXT,
-                created_at  REAL NOT NULL
+                created_at  REAL NOT NULL,
+                ffmpeg_cmd  TEXT
             )
         """)
+        # Migration: add ffmpeg_cmd column to existing databases
+        try:
+            await db.execute("ALTER TABLE encode_jobs ADD COLUMN ffmpeg_cmd TEXT")
+        except Exception:
+            pass  # column already exists
         await db.commit()
 
 
@@ -1971,50 +1979,51 @@ async def get_file_meta(db: aiosqlite.Connection, path: Path) -> dict:
         if row:
             return dict(row)
 
-    meta = await run_ffprobe(path)
-    embedded_tconst = meta.pop("_embedded_tconst", None)
-    # ffprobe doesn't surface iTunes freeform atoms — read MP4 tag via mutagen
-    if not embedded_tconst and path.suffix.lower() == ".mp4":
-        embedded_tconst = await asyncio.to_thread(_read_mp4_tconst_sync, str(path))
-    meta.update({"path": str(path), "size": stat.st_size, "mtime": stat.st_mtime,
-                 "scanned_at": time.time()})
-    await db.execute(
-        """INSERT OR REPLACE INTO file_meta
-           (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec, hdr_type)
-           VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type)""",
-        meta,
-    )
-    # Restore IMDB match from embedded file tag if not already in DB
-    if embedded_tconst:
-        async with db.execute(
-            "SELECT 1 FROM file_imdb WHERE path=?", (str(path),)
-        ) as cur:
-            if not await cur.fetchone():
-                # Look up title/year from imdb.db to populate properly
-                imdb_info: dict = {}
-                try:
-                    async with aiosqlite.connect(IMDB_DB_PATH) as idb:
-                        async with idb.execute(
-                            "SELECT primary_title, start_year, genres, runtime_minutes"
-                            " FROM imdb_titles WHERE tconst=?", (embedded_tconst,)
-                        ) as icur:
-                            irow = await icur.fetchone()
-                            if irow:
-                                imdb_info = {
-                                    "primary_title": irow[0], "start_year": irow[1],
-                                    "genres": irow[2], "runtime_minutes": irow[3],
-                                }
-                except Exception:
-                    pass
-                await db.execute(
-                    "INSERT OR IGNORE INTO file_imdb"
-                    " (path, tconst, primary_title, start_year, genres, runtime_minutes)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (str(path), embedded_tconst, imdb_info.get("primary_title"),
-                     imdb_info.get("start_year"), imdb_info.get("genres"),
-                     imdb_info.get("runtime_minutes")),
-                )
-    await db.commit()
+    async with _SCAN_SEM:
+        meta = await run_ffprobe(path)
+        embedded_tconst = meta.pop("_embedded_tconst", None)
+        # ffprobe doesn't surface iTunes freeform atoms — read MP4 tag via mutagen
+        if not embedded_tconst and path.suffix.lower() == ".mp4":
+            embedded_tconst = await asyncio.to_thread(_read_mp4_tconst_sync, str(path))
+        meta.update({"path": str(path), "size": stat.st_size, "mtime": stat.st_mtime,
+                     "scanned_at": time.time()})
+        await db.execute(
+            """INSERT OR REPLACE INTO file_meta
+               (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec, hdr_type)
+               VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type)""",
+            meta,
+        )
+        # Restore IMDB match from embedded file tag if not already in DB
+        if embedded_tconst:
+            async with db.execute(
+                "SELECT 1 FROM file_imdb WHERE path=?", (str(path),)
+            ) as cur:
+                if not await cur.fetchone():
+                    # Look up title/year from imdb.db to populate properly
+                    imdb_info: dict = {}
+                    try:
+                        async with aiosqlite.connect(IMDB_DB_PATH) as idb:
+                            async with idb.execute(
+                                "SELECT primary_title, start_year, genres, runtime_minutes"
+                                " FROM imdb_titles WHERE tconst=?", (embedded_tconst,)
+                            ) as icur:
+                                irow = await icur.fetchone()
+                                if irow:
+                                    imdb_info = {
+                                        "primary_title": irow[0], "start_year": irow[1],
+                                        "genres": irow[2], "runtime_minutes": irow[3],
+                                    }
+                    except Exception:
+                        pass
+                    await db.execute(
+                        "INSERT OR IGNORE INTO file_imdb"
+                        " (path, tconst, primary_title, start_year, genres, runtime_minutes)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (str(path), embedded_tconst, imdb_info.get("primary_title"),
+                         imdb_info.get("start_year"), imdb_info.get("genres"),
+                         imdb_info.get("runtime_minutes")),
+                    )
+        await db.commit()
     return meta
 
 
@@ -2156,7 +2165,7 @@ async def _file_scan_events(dir_path: Path, request: Request):
 
     async with aiosqlite.connect(DB_PATH) as db:
         async def probe_one(f) -> None:
-            async with _SCAN_SEM:
+            async with _STAT_SEM:
                 try:
                     meta = await _probe_file(db, Path(f.path))
                 except Exception:
@@ -2485,18 +2494,22 @@ async def move_to_folder(request: Request):
     folder_name: str = body.get("folder", "").strip()
     if not paths or not folder_name:
         raise HTTPException(status_code=400, detail="paths and folder are required")
-    if "/" in folder_name or "\\" in folder_name or not folder_name:
-        raise HTTPException(status_code=400, detail="Invalid folder name")
-
     moved, errors = [], []
     target_dir: Path | None = None
+    is_absolute_target = folder_name.startswith("/") or folder_name.startswith("\\") or (len(folder_name) > 1 and folder_name[1] == ":")
+
     for raw_path in paths:
         try:
             src = safe_path(raw_path)
             if not src.is_file():
                 errors.append({"path": raw_path, "error": "not a file"})
                 continue
-            dest_dir = src.parent / folder_name
+
+            if is_absolute_target:
+                dest_dir = safe_path(folder_name)
+            else:
+                dest_dir = safe_path(str((src.parent / folder_name).resolve()))
+
             dest_dir.mkdir(exist_ok=True)
             if target_dir is None:
                 target_dir = dest_dir
@@ -2513,6 +2526,7 @@ async def move_to_folder(request: Request):
                 )
                 await db.commit()
             _dir_listing_cache.pop(str(src.parent), None)
+            _dir_listing_cache.pop(str(dest_dir), None)
             moved.append(str(dest))
         except Exception as exc:
             errors.append({"path": raw_path, "error": str(exc)})
@@ -2624,6 +2638,30 @@ async def delete_file(request: Request, path: str = Query(...)):
     return Response(status_code=204)
 
 
+@app.delete("/dir")
+async def delete_dir(request: Request, path: str = Query(...)):
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Missing or invalid delete token")
+    dir_path = safe_path(path)
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404)
+    shutil.rmtree(dir_path)
+    prefix = str(dir_path)
+    if not prefix.endswith("/"):
+        prefix += "/"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM file_meta WHERE path = ? OR path LIKE ?",
+            (str(dir_path), prefix + "%")
+        )
+        await db.commit()
+    _dir_size_cache.pop(str(dir_path.parent), None)
+    _dir_listing_cache.pop(str(dir_path.parent), None)
+    _dir_size_cache.pop(str(dir_path), None)
+    _dir_listing_cache.pop(str(dir_path), None)
+    return Response(status_code=204)
+
+
 @app.post("/rescan")
 async def rescan(request: Request):
     if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
@@ -2646,6 +2684,7 @@ class EncodeJob:
         "eta", "encoder", "input_size", "output_size",
         "started_at", "finished_at", "error", "created_at",
         "input_media_info", "output_width", "output_height", "moved",
+        "ffmpeg_cmd",
         "_proc", "_task",
     )
 
@@ -2673,6 +2712,7 @@ class EncodeJob:
         self.output_width = int(config.get("_derived_output_width") or 0)
         self.output_height = int(config.get("_derived_output_height") or 0)
         self.moved: bool = False
+        self.ffmpeg_cmd: str = ""
         self._proc = None
         self._task = None
 
@@ -2737,12 +2777,12 @@ async def _save_encode_job(job: EncodeJob) -> None:
         await db.execute(
             """INSERT OR REPLACE INTO encode_jobs
                (id, input_path, output_path, config, status, encoder,
-                input_size, output_size, started_at, finished_at, error, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                input_size, output_size, started_at, finished_at, error, created_at, ffmpeg_cmd)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job.id, job.input_path, job.output_path,
              json.dumps(job.config), job.status, job.encoder,
              job.input_size, job.output_size,
-             job.started_at, job.finished_at, job.error, job.created_at),
+             job.started_at, job.finished_at, job.error, job.created_at, job.ffmpeg_cmd),
         )
         await db.commit()
 
@@ -2809,6 +2849,8 @@ async def _load_encode_jobs() -> None:
         job.started_at  = row["started_at"] or 0.0
         job.finished_at = row["finished_at"]
         job.error       = row["error"]
+        if "ffmpeg_cmd" in row.keys():
+            job.ffmpeg_cmd = row["ffmpeg_cmd"] or ""
         _encode_jobs[job.id] = job
 
     # Re-queue anything that was in-flight when the server last stopped
@@ -3025,6 +3067,8 @@ async def _encode_worker() -> None:
 
 def _choose_encoder_name(hw: dict, gpu_pref: str, codec: str = "hevc") -> str:
     """Return ffmpeg encoder name based on available hardware, user preference, and codec."""
+    if codec == "copy":
+        return "copy"
     _SW    = {"hevc": "libx265",    "h264": "libx264",    "av1": "libsvtav1"}
     _QSV   = {"hevc": "hevc_qsv",  "h264": "h264_qsv",  "av1": "av1_qsv"}
     _NVENC = {"hevc": "hevc_nvenc","h264": "h264_nvenc", "av1": "av1_nvenc"}
@@ -3093,16 +3137,17 @@ def _build_ffmpeg_cmd(
     cmd = ["ffmpeg", "-y",
            "-analyzeduration", "100M", "-probesize", "100M"]
 
-    dri_dev = hw.get("dri_device") or "/dev/dri/renderD128"
-    if is_qsv:
-        cmd += ["-init_hw_device", f"vaapi=va:{dri_dev}",
-                "-init_hw_device", "qsv=hw@va",
-                "-filter_hw_device", "hw"]
-    elif is_vaapi:
-        cmd += ["-vaapi_device", dri_dev]
-    elif is_nvenc and hw.get("nvenc_cuvid") and codec != "h264":
-        # H264 NVENC can't consume CUDA frames — skip cuvid for H264 entirely
-        cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    if encoder != "copy":
+        dri_dev = hw.get("dri_device") or "/dev/dri/renderD128"
+        if is_qsv:
+            cmd += ["-init_hw_device", f"vaapi=va:{dri_dev}",
+                    "-init_hw_device", "qsv=hw@va",
+                    "-filter_hw_device", "hw"]
+        elif is_vaapi:
+            cmd += ["-vaapi_device", dri_dev]
+        elif is_nvenc and hw.get("nvenc_cuvid") and codec != "h264":
+            # H264 NVENC can't consume CUDA frames — skip cuvid for H264 entirely
+            cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
 
     cmd += ["-i", input_path]
 
@@ -3123,7 +3168,9 @@ def _build_ffmpeg_cmd(
 
     denoise_params = _HQDN3D_PRESETS.get(denoise, "") if denoise else ""
 
-    if is_qsv:
+    if encoder == "copy":
+        cmd += ["-c:v", "copy"]
+    elif is_qsv:
         pix_fmt = "p010le" if is_10bit else "nv12"
         vf = []
         if crop_filter:
@@ -3207,9 +3254,12 @@ def _build_ffmpeg_cmd(
 
     # Copy all audio/subtitle streams; -ignore_unknown drops streams the
     # container doesn't support (e.g. PGS subs in MP4) rather than failing.
-    cmd += ["-c:a", "copy", "-c:s", "copy"]
+    if codec == "copy":
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-c:a", "copy", "-c:s", "copy"]
     lang = config.get("lang")
-    cmd += build_stream_maps(lang, a_streams, s_streams) if lang else ["-map", "0"]
+    cmd += build_stream_maps(lang, a_streams, s_streams, codec=codec)
     cmd += ["-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]
@@ -3675,6 +3725,7 @@ async def _run_encode_job(job_id: str) -> None:
             bit_depth, is_hdr, cp, tc, cs, cr,
             crop_filter=crop_filter, a_streams=a_streams, s_streams=s_streams, source_fps=source_fps,
         )
+        job.ffmpeg_cmd = shlex.join(cmd)
         job.encoder = encoder
         try:
             st = await asyncio.to_thread(input_path.stat)
@@ -4487,8 +4538,11 @@ async def start_encode(request: Request, path: str = Query(...)):
     await _check_free_space(file_path.parent, [file_path])
 
     fmt = config["format"]
-    _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
-    base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
+    if config.get("codec") == "copy":
+        base_stem = f"{file_path.stem} (copy)"
+    else:
+        _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
+        base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
     candidate = file_path.parent / f"{base_stem}.{fmt}"
     counter = 2
@@ -4570,7 +4624,7 @@ def _make_encode_config(body: dict) -> dict:
     if preset_val not in ("quality", "balanced", "fast", "speed", "archive"):
         preset_val = "quality"
     codec = str(body.get("codec", _encode_default("codec", "hevc"))).lower()
-    if codec not in ("hevc", "h264", "av1"):
+    if codec not in ("hevc", "h264", "av1", "copy"):
         codec = "hevc"
     denoise_val = body.get("denoise", _encode_default("denoise", None))
     width_val = body.get("width", _encode_default("width", None))
@@ -4780,6 +4834,30 @@ async def dismiss_encode(job_id: str, request: Request):
     if job.status in ("running", "queued"):
         # Safety: kill if somehow still active
         _cancel_job(job)
+    await _dismiss_job(job_id)
+    return Response(status_code=204)
+
+
+@app.delete("/encode/{job_id}/output")
+async def delete_encode_output(job_id: str, request: Request):
+    """Delete the output file of an encode job from disk, and dismiss the job."""
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    job = _encode_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not job.moved:
+        try:
+            op = Path(job.output_path)
+            if op.exists():
+                await asyncio.to_thread(op.unlink)
+        except Exception as exc:
+            log.warning("Could not delete output file %s: %s", job.output_path, exc)
+            raise HTTPException(status_code=500, detail=f"Could not delete file: {exc}")
+
+    # Now remove from list and DB
+    _encode_jobs.pop(job_id, None)
     await _dismiss_job(job_id)
     return Response(status_code=204)
 

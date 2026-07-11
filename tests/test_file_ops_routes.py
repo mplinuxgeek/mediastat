@@ -101,6 +101,19 @@ class MoveToFolderTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.f1.exists())
         self.assertEqual(len(result["moved"]), 2)
 
+    async def test_moves_files_into_absolute_folder(self):
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+        dest_dir = main.Path(self._tmpdir.name) / "AbsoluteDest"
+        dest_dir.mkdir()
+        with unittest.mock.patch.object(main, "safe_path", side_effect=lambda p: main.Path(p)):
+            result = await main.move_to_folder(_FakeRequest(headers, {
+                "paths": [str(self.f1), str(self.f2)], "folder": str(dest_dir),
+            }))
+        self.assertTrue((dest_dir / "a.mkv").is_file())
+        self.assertTrue((dest_dir / "b.mkv").is_file())
+        self.assertFalse(self.f1.exists())
+        self.assertEqual(len(result["moved"]), 2)
+
     async def test_400_when_paths_or_folder_missing(self):
         headers = {"X-Delete-Token": main.DELETE_TOKEN}
         with self.assertRaises(main.HTTPException) as ctx:
@@ -144,6 +157,48 @@ class DeleteFileTests(unittest.IsolatedAsyncioTestCase):
         with unittest.mock.patch.object(main, "safe_path", side_effect=_identity_safe_path):
             with self.assertRaises(main.HTTPException) as ctx:
                 await main.delete_file(_FakeRequest(headers), path=str(self.target.parent / "nope.mkv"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
+class DeleteDirTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await main.init_db()
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.target_dir = main.Path(self._tmpdir.name) / "folder"
+        self.target_dir.mkdir()
+        self.target_file = self.target_dir / "inside.mkv"
+        self.target_file.write_bytes(b"0")
+        async with main.aiosqlite.connect(main.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO file_meta (path, size) VALUES (?, ?)", (str(self.target_file), 1)
+            )
+            await db.commit()
+
+    async def asyncTearDown(self):
+        self._tmpdir.cleanup()
+
+    async def test_requires_delete_token(self):
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.delete_dir(_FakeRequest({}), path=str(self.target_dir))
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_deletes_directory_recursively_and_db_rows(self):
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+        with unittest.mock.patch.object(main, "safe_path", side_effect=_identity_safe_path):
+            await main.delete_dir(_FakeRequest(headers), path=str(self.target_dir))
+
+        self.assertFalse(self.target_dir.exists())
+        self.assertFalse(self.target_file.exists())
+        async with main.aiosqlite.connect(main.DB_PATH) as db:
+            async with db.execute("SELECT 1 FROM file_meta WHERE path = ?", (str(self.target_file),)) as cur:
+                row = await cur.fetchone()
+        self.assertIsNone(row)
+
+    async def test_404_when_directory_missing(self):
+        headers = {"X-Delete-Token": main.DELETE_TOKEN}
+        with unittest.mock.patch.object(main, "safe_path", side_effect=_identity_safe_path):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.delete_dir(_FakeRequest(headers), path=str(self.target_dir / "nope"))
         self.assertEqual(ctx.exception.status_code, 404)
 
 

@@ -309,6 +309,16 @@
             border-bottom: 1px solid var(--border);
             background: var(--surface);
         }
+        .folder-header.drop-target {
+            background: color-mix(in srgb, var(--accent) 15%, transparent);
+            outline: 1px dashed var(--accent);
+            outline-offset: -1px;
+        }
+        main#root-content.drop-target {
+            outline: 2px dashed var(--accent);
+            outline-offset: -4px;
+            background: color-mix(in srgb, var(--accent) 5%, transparent);
+        }
         .folder-header-name {
             font-size: var(--fs-base); font-weight: 600; color: var(--text);
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -847,6 +857,20 @@
         }
         details.dir-entry > summary:hover .dir-encode-btn { opacity: 1; }
         .dir-encode-btn:hover { color: var(--yellow); background: rgba(210,153,34,0.1); }
+        .dir-delete-btn {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            padding: 1px 5px;
+            border-radius: var(--r-sm);
+            font-size: var(--fs-xs);
+            line-height: 1.6;
+            opacity: 0;
+            transition: color 0.1s, background 0.1s, opacity 0.1s;
+        }
+        details.dir-entry > summary:hover .dir-delete-btn { opacity: 1; }
+        .dir-delete-btn:hover { color: var(--red); background: rgba(248,81,73,0.1); }
 
         .search-dropdown {
             position: fixed;

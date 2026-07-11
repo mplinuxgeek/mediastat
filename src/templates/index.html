@@ -98,12 +98,18 @@
     <div class="error-banner">Path not found: {{ error }}</div>
     {% endif %}
 
-    <div id="folder-header" class="folder-header">
+    <div id="folder-header" class="folder-header"
+         ondragover="_onRootDragOver(event, this)"
+         ondragleave="_onRootDragLeave(event, this)"
+         ondrop="_onRootDrop(event, this)">
         <span id="folder-header-name" class="folder-header-name"></span>
         <span id="folder-header-usage" class="folder-header-usage"></span>
     </div>
 
     <main id="root-content"
+          ondragover="_onRootDragOver(event, this)"
+          ondragleave="_onRootDragLeave(event, this)"
+          ondrop="_onRootDrop(event, this)"
           hx-get="/dir?path={{ media_root | pathquote }}"
           hx-trigger="load"
           hx-target="this"

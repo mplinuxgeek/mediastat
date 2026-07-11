@@ -28,13 +28,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
-COPY main.py .
-COPY cropdetect_utils.py .
-COPY encode_output_resolution.py .
-COPY encode_stream_selection.py .
-COPY encode_estimate.py .
-COPY templates/ templates/
-COPY static/ static/
+COPY src/ /app/
 
 RUN mkdir -p /data /media
 

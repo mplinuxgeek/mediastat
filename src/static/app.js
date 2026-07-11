@@ -1766,14 +1766,58 @@
         t._timer = setTimeout(() => t.classList.remove('show'), duration);
     }
 
+    class TaskQueue {
+        constructor(concurrency = 2) {
+            this.concurrency = concurrency;
+            this.running = 0;
+            this.queue = [];
+        }
+        add(fn) {
+            return new Promise((resolve, reject) => {
+                this.queue.push({ fn, resolve, reject });
+                this.next();
+            });
+        }
+        next() {
+            while (this.running < this.concurrency && this.queue.length > 0) {
+                const { fn, resolve, reject } = this.queue.shift();
+                this.running++;
+                Promise.resolve()
+                    .then(() => fn())
+                    .then(resolve)
+                    .catch(reject)
+                    .finally(() => {
+                        this.running--;
+                        this.next();
+                    });
+            }
+        }
+    }
+
+    const _dirSizeQueue = new TaskQueue(2);
+    const _dirCheckQueue = new TaskQueue(1);
+
     // ── File scan progress via SSE ───────────────────────────────
     // staleTable: existing .files-table to update in-place (may be null for fresh scans)
-    function startFileScan(el, staleTable) {
-        if (el._scanStarted) return;
+    function startFileScan(el, staleTable, onDone) {
+        if (el._scanStarted) {
+            if (onDone) onDone();
+            return;
+        }
         el._scanStarted = true;
         const path = el.dataset.path;
         const total = parseInt(el.dataset.total) || 0;
         const source = new EventSource('/dir-scan?path=' + encodeURIComponent(path));
+
+        let table = staleTable;
+        if (!table) {
+            table = document.createElement('div');
+            table.className = 'files-table';
+            const block = el.closest('.dir-block');
+            if (block) {
+                block.appendChild(table);
+            }
+        }
 
         source.onmessage = (e) => {
             const data = JSON.parse(e.data);
@@ -1784,19 +1828,18 @@
                 el.querySelector('.scan-total').textContent = tot;
                 el.querySelector('.scan-bar-fill').style.width = (tot > 0 ? done / tot * 100 : 0) + '%';
 
-                // Incrementally update the stale table if we have per-file HTML
-                if (staleTable && data.file_html) {
+                if (table && data.file_html) {
                     const tmp = document.createElement('div');
                     tmp.innerHTML = data.file_html;
                     const newRow = tmp.querySelector('.file-entry');
                     if (newRow) {
-                        const existing = staleTable.querySelector(
+                        const existing = table.querySelector(
                             `.file-entry[data-path="${CSS.escape(newRow.dataset.path)}"]`
                         );
                         if (existing) {
                             existing.replaceWith(newRow);
                         } else {
-                            staleTable.appendChild(newRow);
+                            table.appendChild(newRow);
                         }
                     }
                 }
@@ -1804,18 +1847,17 @@
                 source.close();
                 const block = el.closest('.dir-block');
                 el.remove();
-                if (staleTable) {
+                if (table) {
                     if (data.html) {
                         const tmp = document.createElement('div');
                         tmp.innerHTML = data.html;
                         const newTable = tmp.querySelector('.files-table');
-                        if (newTable) staleTable.replaceWith(newTable);
-                        else staleTable.remove();
+                        if (newTable) table.replaceWith(newTable);
+                        else table.remove();
                     } else {
-                        staleTable.remove();
+                        table.remove();
                     }
                 } else if (data.html) {
-                    // fresh scan — insert into block
                     const tmp = document.createElement('div');
                     tmp.innerHTML = data.html;
                     block && block.appendChild(tmp.firstElementChild);
@@ -1823,10 +1865,26 @@
                 applyFilters();
                 rebuildDynamicFilters();
                 loadImdbBadges(path);
+                if (onDone) onDone();
             }
         };
 
-        source.onerror = () => { source.close(); el.remove(); if (staleTable) staleTable.classList.remove('stale'); };
+        source.onerror = () => {
+            source.close();
+            el.remove();
+            if (table) table.classList.remove('stale');
+            if (onDone) onDone();
+        };
+    }
+
+    function enqueueFreshScan(el) {
+        if (el._scanEnqueued) return;
+        el._scanEnqueued = true;
+        _dirCheckQueue.add(() => {
+            return new Promise((resolve) => {
+                startFileScan(el, null, resolve);
+            });
+        }).catch(() => {});
     }
 
     // ── Lazy dir sizes ────────────────────────────────────────────
@@ -1835,14 +1893,15 @@
         entries.forEach(el => {
             const p = el.dataset.dirPath;
             if (!p) return;
-            fetch('/dir-size?path=' + p)
-                .then(r => r.json())
-                .then(d => {
-                    el.dataset.size = d.size;
-                    const span = el.querySelector('.dir-size-inline');
-                    if (span) span.textContent = d.human;
-                })
-                .catch(() => {});
+            _dirSizeQueue.add(() =>
+                fetch('/dir-size?path=' + p)
+                    .then(r => r.json())
+                    .then(d => {
+                        el.dataset.size = d.size;
+                        const span = el.querySelector('.dir-size-inline');
+                        if (span) span.textContent = d.human;
+                    })
+            ).catch(() => {});
         });
     }
 
@@ -1851,33 +1910,37 @@
         if (el._checkStarted) return;
         el._checkStarted = true;
         const path = el.dataset.path;
-        fetch('/dir-check?path=' + encodeURIComponent(path))
-            .then(r => r.json())
-            .then(data => {
-                if (!data.changed) { el.remove(); loadImdbBadges(path); return; }
-                const block = el.closest('.dir-block');
-                const table = block && block.querySelector('.files-table');
-                const count = parseInt(el.dataset.count) || 0;
-                const scanEl = document.createElement('div');
-                scanEl.className = 'files-scanning inline';
-                scanEl.dataset.path = path;
-                scanEl.dataset.total = count;
-                scanEl.innerHTML =
-                    '<div class="scan-progress">' +
-                    '<span class="scan-text">updating <span class="scan-done">0</span>' +
-                    '/<span class="scan-total">' + count + '</span></span>' +
-                    '<div class="scan-bar"><div class="scan-bar-fill"></div></div>' +
-                    '</div>';
-                // Insert progress bar above the table (or in place of the checking div)
-                if (table) {
-                    table.before(scanEl);
-                } else {
-                    el.replaceWith(scanEl);
-                }
-                el.remove();
-                startFileScan(scanEl, table || null);
-            })
-            .catch(() => el.remove());
+        _dirCheckQueue.add(() =>
+            fetch('/dir-check?path=' + encodeURIComponent(path))
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.changed) { el.remove(); loadImdbBadges(path); return; }
+                    const block = el.closest('.dir-block');
+                    const table = block && block.querySelector('.files-table');
+                    const count = parseInt(el.dataset.count) || 0;
+                    const scanEl = document.createElement('div');
+                    scanEl.className = 'files-scanning inline';
+                    scanEl.dataset.path = path;
+                    scanEl.dataset.total = count;
+                    scanEl._scanEnqueued = true;
+                    scanEl.innerHTML =
+                        '<div class="scan-progress">' +
+                        '<span class="scan-text">updating <span class="scan-done">0</span>' +
+                        '/<span class="scan-total">' + count + '</span></span>' +
+                        '<div class="scan-bar"><div class="scan-bar-fill"></div></div>' +
+                        '</div>';
+                    if (table) {
+                        table.before(scanEl);
+                    } else {
+                        el.replaceWith(scanEl);
+                    }
+                    el.remove();
+                    return new Promise((resolve) => {
+                        startFileScan(scanEl, table || null, resolve);
+                    });
+                })
+                .catch(() => el.remove())
+        );
     }
 
     // ── URL-based filter persistence ─────────────────────────────
@@ -1946,7 +2009,7 @@
     });
 
     // Kick off scans/checks for placeholders on initial page load
-    document.querySelectorAll('.files-scanning').forEach(startFileScan);
+    document.querySelectorAll('.files-scanning').forEach(enqueueFreshScan);
     document.querySelectorAll('.files-checking').forEach(startDirCheck);
     loadDirSizes(document);
     loadFolderHeader();
@@ -2014,9 +2077,9 @@
             if (_sortBar.contains(m.target)) continue;  // ignore sort-bar mutations (would cause infinite loop)
             for (const node of m.addedNodes) {
                 if (node.nodeType !== 1) continue;
-                if (node.classList.contains('files-scanning')) { startFileScan(node); continue; }
+                if (node.classList.contains('files-scanning')) { enqueueFreshScan(node); continue; }
                 if (node.classList.contains('files-checking')) { startDirCheck(node); continue; }
-                node.querySelectorAll('.files-scanning').forEach(startFileScan);
+                node.querySelectorAll('.files-scanning').forEach(enqueueFreshScan);
                 node.querySelectorAll('.files-checking').forEach(startDirCheck);
                 if (node.classList.contains('dir-block')) { loadDirSizes(node); }
                 node.querySelectorAll('.dir-block').forEach(b => { loadDirSizes(b); });
@@ -2222,8 +2285,9 @@
             container.appendChild(frag);
         };
         document.querySelectorAll('.dir-block').forEach(block => {
-            reorder(block.querySelector('.dirs-container'), ':scope > .dir-entry');
-            const ft = block.querySelector('.files-table');
+            const dc = block.querySelector(':scope > .dirs-container');
+            if (dc) reorder(dc, ':scope > .dir-entry');
+            const ft = block.querySelector(':scope > .files-table');
             if (ft) reorder(ft, ':scope > .file-entry');
         });
     }
