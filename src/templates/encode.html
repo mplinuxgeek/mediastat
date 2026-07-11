@@ -403,7 +403,10 @@ function connectSSE() {
             updateNoJobs();
             loadStats();
         } else if (msg.type === 'queue_order') {
-            // Update queue_pos for all queued jobs and re-render them
+            // Update queue_pos for all queued jobs (patches each card's
+            // reorder-button disabled state) then resort the DOM to match —
+            // patchJobCard alone never moves cards, so without this the list
+            // only visibly reordered once some job's status changed too.
             const order = msg.order || [];
             order.forEach((id, pos) => {
                 if (_jobs[id]) { _jobs[id].queue_pos = pos; renderJob(id); }
@@ -414,6 +417,7 @@ function connectSSE() {
                     j.queue_pos = -1; renderJob(j.id);
                 }
             });
+            _resortJobsList();
         }
     };
     es.onerror = () => setTimeout(connectSSE, 3000);
@@ -450,18 +454,36 @@ function encBadgeHtml(enc) {
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
+// Show running first, then queued (in queue_pos order), then done/failed/
+// cancelled (newest last). Queued jobs tie at started_at=0 until they start,
+// so queue_pos — not started_at — is what actually reflects manual reordering.
+const _JOB_STATUS_ORDER = { running: 0, queued: 1, done: 2, failed: 2, cancelled: 2 };
+function _jobSortKey(j) {
+    if (!j) return [3, 0];
+    const statusRank = _JOB_STATUS_ORDER[j.status] ?? 2;
+    const tiebreak = j.status === 'queued' ? (j.queue_pos ?? Infinity) : (j.started_at || 0);
+    return [statusRank, tiebreak];
+}
+function _compareJobs(a, b) {
+    const [ra, ta] = _jobSortKey(a);
+    const [rb, tb] = _jobSortKey(b);
+    return ra !== rb ? ra - rb : ta - tb;
+}
+
 function renderAll() {
     const list = document.getElementById('jobs-list');
     list.innerHTML = '';
-    // Show running first, then queued, then done/failed/cancelled (newest last)
-    const order = { running: 0, queued: 1, done: 2, failed: 2, cancelled: 2 };
-    const sorted = Object.values(_jobs).sort((a, b) => {
-        const od = (order[a.status] ?? 2) - (order[b.status] ?? 2);
-        if (od !== 0) return od;
-        return (a.started_at || 0) - (b.started_at || 0);
-    });
+    const sorted = Object.values(_jobs).sort(_compareJobs);
     sorted.forEach(j => { list.appendChild(buildCard(j)); });
     updateNoJobs();
+}
+
+// Re-sort the existing DOM cards to match current _jobs order/queue_pos,
+// without rebuilding any of them.
+function _resortJobsList() {
+    const list = document.getElementById('jobs-list');
+    [...list.children].sort((a, b) => _compareJobs(_jobs[a.id.slice(4)], _jobs[b.id.slice(4)]))
+        .forEach(el => list.appendChild(el));
 }
 
 function renderJob(id) {
@@ -488,14 +510,7 @@ function renderJob(id) {
         document.getElementById('jobs-list').prepend(card);
     }
     // Re-sort so running jobs always appear at the top
-    const list = document.getElementById('jobs-list');
-    const order = { running: 0, queued: 1, done: 2, failed: 2, cancelled: 2 };
-    [...list.children].sort((a, b) => {
-        const ja = _jobs[a.id.slice(4)], jb = _jobs[b.id.slice(4)];
-        const od = (order[ja?.status] ?? 2) - (order[jb?.status] ?? 2);
-        if (od !== 0) return od;
-        return (ja?.started_at || 0) - (jb?.started_at || 0);
-    }).forEach(el => list.appendChild(el));
+    _resortJobsList();
 }
 
 // Updates only the parts of a job card that change from one progress tick
