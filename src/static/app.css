@@ -1018,6 +1018,9 @@
 
         #mobile-filter-toggle { display: none; }
 
+        .tools-group { display: contents; }
+        #tools-toggle-btn { display: none; }
+
         /* ── Basic responsive layout ──────────────────────────────────
            Desktop layout (table-based file rows, single-line header) is
            unchanged above this breakpoint. Below it: the header wraps
@@ -1083,4 +1086,15 @@
                 max-height: 60vh;
                 overflow-y: auto;
             }
+            #tools-toggle-btn { display: inline-flex; }
+            .tools-group {
+                display: none;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 6px;
+                width: 100%;
+                order: 99;
+                padding-top: 8px;
+            }
+            .tools-group.open { display: flex; }
         }

@@ -2293,6 +2293,20 @@
         if (!bar.contains(e.target) && !toggle.contains(e.target)) bar.classList.remove('open');
     }
 
+    function toggleToolsMenu() {
+        const group = document.getElementById('tools-group');
+        group.classList.toggle('open');
+        if (group.classList.contains('open')) {
+            setTimeout(() => document.addEventListener('click', _toolsMenuOutside, { once: true }), 0);
+        }
+    }
+
+    function _toolsMenuOutside(e) {
+        const group = document.getElementById('tools-group');
+        const toggle = document.getElementById('tools-toggle-btn');
+        if (!group.contains(e.target) && !toggle.contains(e.target)) group.classList.remove('open');
+    }
+
     function toggleFilter(btn) {
         btn.classList.toggle('active');
         const group = btn.dataset.filterGroup;

@@ -44,6 +44,8 @@
                placeholder="search… try 1080p x265 -hdr" autocomplete="off" spellcheck="false"
                oninput="applyGlobalSearch()"
                title="Tokens: resolution (4k/1080p/720p/sd), codec (h265/h264/av1/vp9), HDR (hdr/dv/hlg/sdr). Prefix with - to exclude. Anything else matches the filename.">
+        <button id="tools-toggle-btn" class="btn" onclick="toggleToolsMenu()" title="More tools">⋯</button>
+        <div class="tools-group" id="tools-group">
         <button class="btn" onclick="openSearchSettings()" title="Configure search sites">⚙ searches</button>
         <button class="btn" onclick="openDupesModal()" title="Find likely duplicate files by name similarity">⊕ dupes</button>
         <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
@@ -65,6 +67,7 @@
         <a href="{{ ingress_path }}/imdb-scan" class="btn nav-link-desktop" title="IMDb background scan" style="margin-left:auto;text-decoration:none">⬡ IMDb</a>
         <a href="{{ ingress_path }}/databases" class="btn nav-link-desktop" title="Databases &amp; system info" style="text-decoration:none">⬡ DB</a>
         <button class="btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch between dark and light theme">🌓</button>
+        </div>
     </header>
     {% include "_mobile_tabs.html" %}
 
