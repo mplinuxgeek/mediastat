@@ -2182,11 +2182,13 @@
         });
     }
 
-    // Recognized search tokens — e.g. "1080p x265 -hdr" narrows by resolution/
-    // codec/HDR directly in the search box instead of needing the filter-button
-    // bar, with a leading "-" excluding instead of requiring. Anything else is
-    // treated as a plain substring match against the filename (AND-combined
-    // across multiple such terms).
+    // Recognized search tokens — e.g. "1080p x265 -hdr >2018" narrows by
+    // resolution/codec/HDR/year directly in the search box instead of needing
+    // the filter-button bar, with a leading "-" excluding instead of requiring.
+    // Year tokens use a leading >, <, >=, or <= against a 4-digit year, matched
+    // against the file's IMDb year if known, else a year parsed from the
+    // filename. Anything else is treated as a plain substring match against
+    // the filename (AND-combined across multiple such terms).
     const _RES_TOKENS = { '4k': '4k', '2160p': '4k', 'uhd': '4k', '1080p': '1080p', 'fhd': '1080p',
                            '720p': '720p', 'hd': '720p', '480p': 'sd', 'sd': 'sd' };
     const _CODEC_TOKENS = { 'h265': 'h265', 'x265': 'h265', 'hevc': 'h265',
@@ -2194,14 +2196,18 @@
                              'av1': 'av1', 'vp9': 'vp9' };
     const _HDR_TOKENS = { 'hdr': 'HDR', 'hdr10': 'HDR', 'dv': 'DV', 'dolbyvision': 'DV',
                            'hlg': 'HLG', 'sdr': 'SDR' };
+    const _YEAR_TOKEN_RE = /^(>=|<=|>|<)((?:19|20)\d{2})$/;
 
     function _parseSearchQuery(raw) {
         const q = {
             nameTerms: [], includeRes: new Set(), excludeRes: new Set(),
             includeCodec: new Set(), excludeCodec: new Set(),
             includeHdr: new Set(), excludeHdr: new Set(),
+            yearOp: null, yearVal: null,
         };
         for (const rawTok of raw.trim().toLowerCase().split(/\s+/).filter(Boolean)) {
+            const yearMatch = rawTok.match(_YEAR_TOKEN_RE);
+            if (yearMatch) { q.yearOp = yearMatch[1]; q.yearVal = parseInt(yearMatch[2]); continue; }
             const negate = rawTok.startsWith('-');
             const tok = negate ? rawTok.slice(1) : rawTok;
             if (!tok) continue;
@@ -2213,12 +2219,27 @@
         return q;
     }
 
+    function _entryYear(e) {
+        const imdbYear = parseInt(e.dataset.imdbYear);
+        if (!isNaN(imdbYear)) return imdbYear;
+        return parseMediaFilename(e.dataset.name || '').year;
+    }
+
     function applyFilters() {
         const rawTerm = document.getElementById('search-input').value || '';
         const q = _parseSearchQuery(rawTerm);
         document.querySelectorAll('.files-table > .file-entry').forEach(e => {
             const name = e.dataset.name || '';
             if (q.nameTerms.length && !q.nameTerms.every(t => name.includes(t))) { e.style.display = 'none'; return; }
+            if (q.yearOp) {
+                const year = _entryYear(e);
+                if (year == null) { e.style.display = 'none'; return; }
+                const cmp = q.yearOp === '>'  ? year > q.yearVal
+                          : q.yearOp === '<'  ? year < q.yearVal
+                          : q.yearOp === '>=' ? year >= q.yearVal
+                          :                     year <= q.yearVal;
+                if (!cmp) { e.style.display = 'none'; return; }
+            }
             const res = resTag(parseInt(e.dataset.width) || 0, parseInt(e.dataset.height) || 0);
             if (q.includeRes.size && !q.includeRes.has(res)) { e.style.display = 'none'; return; }
             if (q.excludeRes.has(res)) { e.style.display = 'none'; return; }
