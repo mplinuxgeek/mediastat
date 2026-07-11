@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bump ha-addon/config.yaml version, commit, tag, and push.
-# Usage: scripts/release.sh [major|minor|patch]  (default: patch)
+# Usage: ./release.sh [major|minor|patch]  (default: patch)
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
