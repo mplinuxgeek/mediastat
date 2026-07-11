@@ -24,10 +24,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
 
       - name: Run tests
-        run: python3 -m unittest discover -p "test_*.py" -v
+        run: python3 -m pytest tests/ -v
 
   build:
     name: Build ${{ matrix.arch }}
@@ -51,9 +53,9 @@ jobs:
 
       - name: Sync app sources into ha-addon/
         run: |
-          cp main.py requirements.txt ha-addon/
-          cp -r templates ha-addon/
-          cp -r static ha-addon/
+          cp src/main.py requirements.txt ha-addon/
+          cp -r src/templates ha-addon/
+          cp -r src/static ha-addon/
 
       - name: Set up QEMU (for cross-arch builds)
         uses: docker/setup-qemu-action@v3.6.0
