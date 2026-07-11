@@ -1012,6 +1012,8 @@
         .health-ok { color: var(--green); font-size: var(--fs-base); padding: 12px 0; }
         .health-scanning { color: var(--muted); font-size: var(--fs-sm); font-style: italic; }
 
+        .res-badge-mobile { display: none; }
+
         /* ── Basic responsive layout ──────────────────────────────────
            Desktop layout (table-based file rows, single-line header) is
            unchanged above this breakpoint. Below it: the header wraps
@@ -1039,4 +1041,8 @@
             .batch-checkbox-cell { display: inline-block; }
 
             .modal { padding: 16px 18px; }
+            .poster-thumb, .imdb-rating-badge,
+            .badge-cell-ext, .badge-cell-audio, .badge-cell-duration,
+            .res-badge-desktop { display: none; }
+            .res-badge-mobile { display: inline-block; }
         }

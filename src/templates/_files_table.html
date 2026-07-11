@@ -23,13 +23,17 @@
     <span class="file-name-cell">
         <img class="poster-thumb" style="display:none" alt="" onerror="this.style.display='none'"><button class="play-btn" onclick="openPlayer(this)" title="Play">&#9654;</button><span class="file-stem" onclick="handleFileClick(this)" title="Click to copy">{{ file.stem }}</span> <span class="tag imdb-rating-badge" style="display:none"></span>
     </span>
-    <span class="badge-cell"><span class="tag {{ file.ext_class }}">{{ file.ext }}</span></span>
+    <span class="badge-cell badge-cell-ext"><span class="tag {{ file.ext_class }}">{{ file.ext }}</span></span>
     <span class="badge-cell"><span class="tag {{ file.size_class }}">{{ file.human_size }}</span></span>
     <span class="badge-cell">{% if file.video_codec and file.video_codec != 'N/A' %}<span class="tag {{ file.codec_class }}">{{ file.video_codec }}</span>{% endif %}</span>
-    <span class="badge-cell">{% if file.width and file.height %}<span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>{% endif %}</span>
+    {% set _w = file.width or 0 %}
+    {% set _h = file.height or 0 %}
+    {% set mobile_res_label = '4K' if (_w >= 3000 or _h >= 2000) else ('1080p' if (_w >= 1700 or _h >= 900) else ('720p' if (_w >= 900 or _h >= 500) else ('SD' if (_w or _h) else ''))) %}
+    <span class="badge-cell res-badge-desktop">{% if file.width and file.height %}<span class="tag {{ file.res_class }}">{{ file.width }}×{{ file.height }}</span>{% endif %}</span>
+    <span class="badge-cell res-badge-mobile">{% if mobile_res_label %}<span class="tag {{ file.res_class }}">{{ mobile_res_label }}</span>{% endif %}</span>
     <span class="badge-cell">{% if file.video_codec and file.video_codec != 'N/A' %}<span class="tag {{ file.hdr_class }}">{{ file.hdr_type or 'SDR' }}</span>{% endif %}</span>
-    <span class="badge-cell">{% if file.audio_codec and file.audio_codec != 'N/A' %}<span class="tag audio">{{ file.audio_codec }}</span>{% endif %}</span>
-    <span class="badge-cell">{% if file.duration_label %}<span class="tag duration">{{ file.duration_label }}</span>{% endif %}</span>
+    <span class="badge-cell badge-cell-audio">{% if file.audio_codec and file.audio_codec != 'N/A' %}<span class="tag audio">{{ file.audio_codec }}</span>{% endif %}</span>
+    <span class="badge-cell badge-cell-duration">{% if file.duration_label %}<span class="tag duration">{{ file.duration_label }}</span>{% endif %}</span>
     <span class="badge-cell"><span class="tag imdb-tag" onclick="event.stopPropagation();_imdbTagClick(this)" title="IMDb">IMDb</span></span>
 
     <span class="file-search-cell">
