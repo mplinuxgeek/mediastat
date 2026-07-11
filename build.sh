@@ -20,16 +20,16 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ADDON_DIR="$(cd "$(dirname "$0")/ha-addon" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ADDON_DIR="${PROJECT_DIR}/ha-addon"
 IMAGE="${IMAGE:-ghcr.io/mplinuxgeek/mediastat-addon}"
 VERSION="$(grep '^version:' "${ADDON_DIR}/config.yaml" | awk '{print $2}' | tr -d '"')"
 
-# Architectures → HA base image mapping (from build.yaml)
+# Architectures → HA base image mapping (kept in sync with .github/workflows/build-addon.yml)
 declare -A BASE_IMAGES=(
-    [amd64]="ghcr.io/home-assistant/amd64-base-debian:bookworm"
-    [aarch64]="ghcr.io/home-assistant/aarch64-base-debian:bookworm"
-    [armv7]="ghcr.io/home-assistant/armv7-base-debian:bookworm"
+    [amd64]="ghcr.io/home-assistant/amd64-base-debian:trixie"
+    [aarch64]="ghcr.io/home-assistant/aarch64-base-debian:trixie"
+    [armv7]="ghcr.io/home-assistant/armv7-base-debian:trixie"
 )
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -48,13 +48,6 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
-
-# ── Copy app sources into addon dir for the Docker build context ──────────────
-echo "==> Syncing app sources into ha-addon/"
-cp "${PROJECT_DIR}/main.py" "${ADDON_DIR}/main.py"
-cp "${PROJECT_DIR}/requirements.txt" "${ADDON_DIR}/requirements.txt"
-rm -rf "${ADDON_DIR}/templates"
-cp -r "${PROJECT_DIR}/templates" "${ADDON_DIR}/templates"
 
 # ── Determine which arches to build ──────────────────────────────────────────
 if [[ -n "${TARGET_ARCH}" ]]; then
@@ -92,12 +85,15 @@ for ARCH in "${ARCHES[@]}"; do
 
     echo "--- Building ${ARCH} (base: ${BASE}) ---"
     docker build \
+        --file "${ADDON_DIR}/Dockerfile" \
         --build-arg BUILD_FROM="${BASE}" \
+        --build-arg GIT_SHA="$(git -C "${PROJECT_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)" \
+        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --platform "linux/${ARCH/aarch64/arm64}" \
         --tag "${TAG}" \
         --tag "${LATEST_TAG}" \
         $( [[ "${PUSH}" == "true" ]] && echo "--push" || echo "--load" ) \
-        "${ADDON_DIR}"
+        "${PROJECT_DIR}"
 
     BUILT_TAGS+=("${TAG}")
     echo "    Built: ${TAG}"
