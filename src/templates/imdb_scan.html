@@ -144,6 +144,30 @@
 
         @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
         .phase-running { animation: pulse 2s ease-in-out infinite; }
+
+        .mobile-tabs { display: none; }
+        @media (max-width: 700px) {
+            .mobile-tabs {
+                display: flex;
+                overflow-x: auto;
+                white-space: nowrap;
+                gap: 4px;
+                padding: 6px 12px;
+                background: var(--surface);
+                border-bottom: 1px solid var(--border);
+                -webkit-overflow-scrolling: touch;
+            }
+            .mobile-tab {
+                flex-shrink: 0;
+                padding: 6px 14px;
+                border-radius: var(--r-md);
+                color: var(--muted);
+                text-decoration: none;
+                font-size: var(--fs-sm);
+                border: 1px solid transparent;
+            }
+            .mobile-tab.active { color: var(--accent); border-color: var(--accent); }
+        }
     </style>
 </head>
 <body>
@@ -151,6 +175,7 @@
     <a href="{{ ingress_path }}/" class="back-link">← Back</a>
     <span class="page-title">IMDb Scan</span>
 </header>
+{% include "_mobile_tabs.html" %}
 
 <main>
     <!-- Settings -->

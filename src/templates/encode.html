@@ -272,6 +272,30 @@
             padding: 3px 6px; font-size: var(--fs-xs);
         }
         .job-action-btn.reorder:disabled { opacity: 0.25; cursor: default; border-color: transparent; }
+
+        .mobile-tabs { display: none; }
+        @media (max-width: 700px) {
+            .mobile-tabs {
+                display: flex;
+                overflow-x: auto;
+                white-space: nowrap;
+                gap: 4px;
+                padding: 6px 12px;
+                background: var(--surface);
+                border-bottom: 1px solid var(--border);
+                -webkit-overflow-scrolling: touch;
+            }
+            .mobile-tab {
+                flex-shrink: 0;
+                padding: 6px 14px;
+                border-radius: var(--r-md);
+                color: var(--muted);
+                text-decoration: none;
+                font-size: var(--fs-sm);
+                border: 1px solid transparent;
+            }
+            .mobile-tab.active { color: var(--accent); border-color: var(--accent); }
+        }
     </style>
 </head>
 <body>
@@ -280,6 +304,7 @@
     <span class="page-title">⚙ Encode Jobs</span>
     <div class="hw-status" id="hw-status">detecting…</div>
 </header>
+{% include "_mobile_tabs.html" %}
 <main>
     <div id="stats-bar" class="stats-bar" style="display:none"></div>
 

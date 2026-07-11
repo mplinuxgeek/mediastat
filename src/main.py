@@ -1635,6 +1635,7 @@ async def imdb_scan_page(request: Request):
         "ingress_path": request.state.ingress_path,
         "delete_token": DELETE_TOKEN,
         "tmdb_configured": bool(_config.get("tmdb_api_key")),
+        "active_tab": "imdb",
     })
 
 
@@ -2222,6 +2223,7 @@ async def index(request: Request):
         "delete_token": DELETE_TOKEN,
         "error": request.query_params.get("error"),
         "ingress_path": request.state.ingress_path,
+        "active_tab": "library",
     })
 
 
@@ -4156,6 +4158,7 @@ async def encode_page(request: Request):
         "request": request,
         "delete_token": DELETE_TOKEN,
         "ingress_path": request.state.ingress_path,
+        "active_tab": "jobs",
     })
 
 
@@ -4164,6 +4167,7 @@ async def databases_page(request: Request):
     return templates.TemplateResponse("databases.html", {
         "request": request,
         "ingress_path": request.state.ingress_path,
+        "active_tab": "db",
     })
 
 

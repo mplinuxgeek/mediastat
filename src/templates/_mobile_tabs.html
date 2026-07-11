@@ -1,0 +1,6 @@
+<nav class="mobile-tabs">
+    <a href="{{ ingress_path }}/" class="mobile-tab{{ ' active' if active_tab == 'library' else '' }}">Library</a>
+    <a href="{{ ingress_path }}/encode" class="mobile-tab{{ ' active' if active_tab == 'jobs' else '' }}">Jobs</a>
+    <a href="{{ ingress_path }}/imdb-scan" class="mobile-tab{{ ' active' if active_tab == 'imdb' else '' }}">IMDb</a>
+    <a href="{{ ingress_path }}/databases" class="mobile-tab{{ ' active' if active_tab == 'db' else '' }}">DB</a>
+</nav>

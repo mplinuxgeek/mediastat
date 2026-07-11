@@ -1014,6 +1014,8 @@
 
         .res-badge-mobile { display: none; }
 
+        .mobile-tabs { display: none; }
+
         /* ── Basic responsive layout ──────────────────────────────────
            Desktop layout (table-based file rows, single-line header) is
            unchanged above this breakpoint. Below it: the header wraps
@@ -1045,4 +1047,26 @@
             .badge-cell-ext, .badge-cell-audio, .badge-cell-duration,
             .res-badge-desktop { display: none; }
             .res-badge-mobile { display: inline-block; }
+
+            .mobile-tabs {
+                display: flex;
+                overflow-x: auto;
+                white-space: nowrap;
+                gap: 4px;
+                padding: 6px 12px;
+                background: var(--surface);
+                border-bottom: 1px solid var(--border);
+                -webkit-overflow-scrolling: touch;
+            }
+            .mobile-tab {
+                flex-shrink: 0;
+                padding: 6px 14px;
+                border-radius: var(--r-md);
+                color: var(--muted);
+                text-decoration: none;
+                font-size: var(--fs-sm);
+                border: 1px solid transparent;
+            }
+            .mobile-tab.active { color: var(--accent); border-color: var(--accent); }
+            .nav-link-desktop { display: none; }
         }
