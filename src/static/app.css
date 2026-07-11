@@ -1016,6 +1016,8 @@
 
         .mobile-tabs { display: none; }
 
+        #mobile-filter-toggle { display: none; }
+
         /* ── Basic responsive layout ──────────────────────────────────
            Desktop layout (table-based file rows, single-line header) is
            unchanged above this breakpoint. Below it: the header wraps
@@ -1069,4 +1071,16 @@
             }
             .mobile-tab.active { color: var(--accent); border-color: var(--accent); }
             .nav-link-desktop { display: none; }
+
+            #mobile-filter-toggle { display: inline-flex; }
+            #global-sort-bar { display: none; }
+            #global-sort-bar.open {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 6px;
+                padding: 10px 12px;
+                max-height: 60vh;
+                overflow-y: auto;
+            }
         }

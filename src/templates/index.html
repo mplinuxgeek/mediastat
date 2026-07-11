@@ -68,6 +68,7 @@
     </header>
     {% include "_mobile_tabs.html" %}
 
+    <button id="mobile-filter-toggle" class="btn" onclick="toggleMobileFilters()" title="Show filters">⚗ Filters</button>
     <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">
         <span class="sort-label">sort:</span>
         <button class="sort-btn active" data-sort="name"  onclick="sortAll(this)" title="Sort by filename">name</button>

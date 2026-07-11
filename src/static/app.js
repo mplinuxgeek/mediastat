@@ -2279,6 +2279,20 @@
         _filterTimer = setTimeout(() => { applyFilters(); updateUrl(); }, 80);
     }
 
+    function toggleMobileFilters() {
+        const bar = document.getElementById('global-sort-bar');
+        bar.classList.toggle('open');
+        if (bar.classList.contains('open')) {
+            setTimeout(() => document.addEventListener('click', _mobileFiltersOutside, { once: true }), 0);
+        }
+    }
+
+    function _mobileFiltersOutside(e) {
+        const bar = document.getElementById('global-sort-bar');
+        const toggle = document.getElementById('mobile-filter-toggle');
+        if (!bar.contains(e.target) && !toggle.contains(e.target)) bar.classList.remove('open');
+    }
+
     function toggleFilter(btn) {
         btn.classList.toggle('active');
         const group = btn.dataset.filterGroup;
