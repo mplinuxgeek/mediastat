@@ -1047,7 +1047,15 @@
             .file-name-cell { display: block; padding: 2px 0; }
             .batch-checkbox-cell { display: inline-block; }
 
-            .modal { padding: 16px 18px; }
+            .modal-overlay { align-items: stretch; }
+            .modal {
+                width: 100vw !important;
+                max-width: none !important;
+                height: 100vh !important;
+                max-height: none !important;
+                border-radius: 0;
+                padding: 16px 18px;
+            }
             .poster-thumb, .imdb-rating-badge,
             .badge-cell-ext, .badge-cell-audio, .badge-cell-duration,
             .res-badge-desktop { display: none; }
