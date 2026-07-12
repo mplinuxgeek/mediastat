@@ -2680,7 +2680,17 @@
         { name: 'NZBGeek', url: 'https://nzbgeek.info/geekseek.php?moviesgeekseek=1&c=&browseincludewords={query}', disabled: false },
         { name: 'IMDB',    url: 'https://www.imdb.com/find/?q={query}',                                            disabled: false },
         { name: 'TheTVDB', url: 'https://www.thetvdb.com/search?query={query}',                                    disabled: false },
+        { name: 'XDCC',    url: 'https://www.xdcc.eu/search.php?searchkey={query}',                                disabled: false, clean: true },
     ];
+
+    // For sites flagged clean:true, search on "Title Year" instead of the raw
+    // filename stem — release tags/brackets/dots confuse simple search-key
+    // engines like xdcc.eu. Reuses the same title/year parser as the search
+    // box's year-token filter (app.js parseMediaFilename).
+    function _cleanQueryText(name) {
+        const { title, year } = parseMediaFilename(name);
+        return year ? `${title} ${year}` : title;
+    }
 
     function _getSearchSites() {
         const raw = localStorage.getItem('ms_searches');
@@ -2709,7 +2719,8 @@
         const menu = document.createElement('div');
         menu.className = 'search-dropdown';
         sites.filter(s => !s.disabled).forEach(s => {
-            const q = encodeURIComponent(stem).replace(/%20/g, '+');
+            const queryText = s.clean ? _cleanQueryText(stem) : stem;
+            const q = encodeURIComponent(queryText).replace(/%20/g, '+');
             const resolved = s.url.replace(/\{query\}/g, q);
             const a = document.createElement('a');
             if (/^https?:\/\//i.test(resolved)) a.href = resolved;
