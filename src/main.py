@@ -1788,7 +1788,8 @@ async def init_db():
                 duration_min INTEGER,
                 scanned_at   REAL,
                 duration_sec REAL,
-                hdr_type     TEXT
+                hdr_type     TEXT,
+                audio_lang   TEXT
             )
         """)
         # Migrations: add columns to existing databases
@@ -1796,6 +1797,7 @@ async def init_db():
             "ALTER TABLE file_meta ADD COLUMN scanned_at REAL",
             "ALTER TABLE file_meta ADD COLUMN duration_sec REAL",
             "ALTER TABLE file_meta ADD COLUMN hdr_type TEXT",
+            "ALTER TABLE file_meta ADD COLUMN audio_lang TEXT",
         ]:
             try:
                 await db.execute(col_sql)
@@ -1916,7 +1918,7 @@ async def run_ffprobe(path: Path) -> dict:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=codec_name,codec_type,width,height,color_transfer,color_primaries,color_space,profile:format=duration,tags",
+            "stream=codec_name,codec_type,width,height,color_transfer,color_primaries,color_space,profile,tags:format=duration,tags",
             "-of", "json", str(path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1928,7 +1930,7 @@ async def run_ffprobe(path: Path) -> dict:
             await proc.wait()
             log.warning("ffprobe timed out for %s", path)
             return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None,
-                    "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR"}
+                    "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR", "audio_lang": ""}
 
     try:
         data = json.loads(stdout)
@@ -1939,6 +1941,10 @@ async def run_ffprobe(path: Path) -> dict:
         # Extract embedded IMDB tconst from container tags (MKV global tags)
         fmt_tags = fmt.get("tags") or {}
         embedded_tconst = fmt_tags.get("IMDB") or fmt_tags.get("imdb") or None
+        audio_tags = audio.get("tags") or {}
+        audio_lang = str(audio_tags.get("language") or audio_tags.get("LANGUAGE") or "").strip().lower()
+        if audio_lang == "und":
+            audio_lang = ""
         return {
             "video_codec": video.get("codec_name", "N/A"),
             "audio_codec": audio.get("codec_name", "N/A"),
@@ -1947,12 +1953,13 @@ async def run_ffprobe(path: Path) -> dict:
             "duration_min": round(duration / 60),
             "duration_sec": duration,
             "hdr_type": _hdr_type_from_stream(video),
+            "audio_lang": audio_lang,
             "_embedded_tconst": embedded_tconst,
         }
     except Exception:
         log.warning("ffprobe parse failed for %s", path, exc_info=True)
         return {"video_codec": "N/A", "audio_codec": "N/A", "width": None, "height": None,
-                "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR"}
+                "duration_min": 0, "duration_sec": 0.0, "hdr_type": "SDR", "audio_lang": ""}
 
 
 def _fmt_duration(secs: float | None) -> str:
@@ -1990,8 +1997,8 @@ async def get_file_meta(db: aiosqlite.Connection, path: Path) -> dict:
                      "scanned_at": time.time()})
         await db.execute(
             """INSERT OR REPLACE INTO file_meta
-               (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec, hdr_type)
-               VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type)""",
+               (path, size, mtime, video_codec, audio_codec, width, height, duration_min, scanned_at, duration_sec, hdr_type, audio_lang)
+               VALUES (:path, :size, :mtime, :video_codec, :audio_codec, :width, :height, :duration_min, :scanned_at, :duration_sec, :hdr_type, :audio_lang)""",
             meta,
         )
         # Restore IMDB match from embedded file tag if not already in DB

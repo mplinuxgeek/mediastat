@@ -98,6 +98,7 @@
         <span id="filter-audio"></span>
         <span class="ctrl-sep">│</span>
         <button class="filter-btn" data-filter-group="imdb" data-filter-val="unmatched" onclick="toggleFilter(this)" title="Show only files without an IMDb match">no IMDb</button>
+        <button class="filter-btn" data-filter-group="audiolang" data-filter-val="nonenglish" onclick="toggleFilter(this)" title="Show only files whose audio track is tagged as a non-English language">non-eng audio</button>
     </div>
 
     {% if error %}

@@ -2115,7 +2115,16 @@
     }
 
     // Cached filter state — updated in toggleFilter/restoreFromUrl, avoids querySelectorAll per applyFilters call
-    const _filterState = { codec: new Set(), res: new Set(), ext: new Set(), audio: new Set(), hdr: new Set(), imdb: new Set() };
+    const _filterState = { codec: new Set(), res: new Set(), ext: new Set(), audio: new Set(), hdr: new Set(), imdb: new Set(), audiolang: new Set() };
+
+    // Aliases for "English" audio-language tags — mirrors the alias handling
+    // used server-side for stream selection (encode_stream_selection.py),
+    // kept minimal here since this filter only needs an English/not-English
+    // distinction rather than full language matching.
+    const _ENGLISH_AUDIO_ALIASES = new Set(['eng', 'en', 'english']);
+    function _isNonEnglishAudio(lang) {
+        return !!lang && !_ENGLISH_AUDIO_ALIASES.has(lang);
+    }
 
     function _activeFilters(group) {
         // Used by _rebuildGroup to restore active state after dynamic rebuild
@@ -2268,6 +2277,7 @@
             if (_filterState.audio.size > 0 && !_filterState.audio.has(e.dataset.audio || '')) { e.style.display = 'none'; return; }
             if (_filterState.hdr.size > 0 && !_filterState.hdr.has(e.dataset.hdr || '')) { e.style.display = 'none'; return; }
             if (_filterState.imdb.has('unmatched') && e.dataset.imdbTitle) { e.style.display = 'none'; return; }
+            if (_filterState.audiolang.has('nonenglish') && !_isNonEnglishAudio(e.dataset.audioLang || '')) { e.style.display = 'none'; return; }
             e.style.display = '';
         });
         document.querySelectorAll('.dirs-container > .dir-entry')
