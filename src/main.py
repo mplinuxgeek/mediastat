@@ -3256,12 +3256,9 @@ def _build_ffmpeg_cmd(
 
     # Copy all audio/subtitle streams; -ignore_unknown drops streams the
     # container doesn't support (e.g. PGS subs in MP4) rather than failing.
-    if codec == "copy":
-        cmd += ["-c:a", "copy"]
-    else:
-        cmd += ["-c:a", "copy", "-c:s", "copy"]
+    cmd += ["-c:a", "copy", "-c:s", "copy"]
     lang = config.get("lang")
-    cmd += build_stream_maps(lang, a_streams, s_streams, codec=codec)
+    cmd += build_stream_maps(lang, a_streams, s_streams)
     cmd += ["-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]

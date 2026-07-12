@@ -63,15 +63,11 @@ def _language_aliases(lang: str) -> set[str]:
     return _LANGUAGE_ALIASES.get(norm, {norm})
 
 
-def build_stream_maps(lang: str, audio_streams: list | None, subtitle_streams: list | None, codec: str = "") -> list[str]:
+def build_stream_maps(lang: str, audio_streams: list | None, subtitle_streams: list | None) -> list[str]:
     norm_lang = str(lang or "").strip().lower()
-    is_copy = (codec == "copy")
 
     if not norm_lang or norm_lang == "all":
-        if is_copy:
-            return ["-map", "0:v:0", "-map", "0:a?"]
-        else:
-            return ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
+        return ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
 
     audio_streams = audio_streams or []
     subtitle_streams = subtitle_streams or []
@@ -83,10 +79,7 @@ def build_stream_maps(lang: str, audio_streams: list | None, subtitle_streams: l
         or stream_lang in ("", "und")
     ]
     if not matched_audio:
-        if is_copy:
-            return ["-map", "0:v:0", "-map", "0:a?"]
-        else:
-            return ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
+        return ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
 
     matched_subtitles = [
         idx for idx, stream in enumerate(subtitle_streams)
@@ -97,8 +90,7 @@ def build_stream_maps(lang: str, audio_streams: list | None, subtitle_streams: l
     maps = ["-map", "0:v:0"]
     for idx in matched_audio:
         maps += ["-map", f"0:a:{idx}"]
-    if not is_copy:
-        for idx in matched_subtitles:
-            maps += ["-map", f"0:s:{idx}?"]
-        maps += ["-map", "0:t?"]
+    for idx in matched_subtitles:
+        maps += ["-map", f"0:s:{idx}?"]
+    maps += ["-map", "0:t?"]
     return maps

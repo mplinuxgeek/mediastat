@@ -57,32 +57,6 @@ class EncodeStreamSelectionTests(unittest.TestCase):
             ["-map", "0:v:0", "-map", "0:a:0", "-map", "0:t?"],
         )
 
-    def test_copy_mode_drops_subtitles_and_attachments(self):
-        audio_streams = [
-            {"tags": {"language": "eng"}},
-            {"tags": {"language": "spa"}},
-        ]
-        subtitle_streams = [
-            {"tags": {"language": "eng"}},
-        ]
-        self.assertEqual(
-            build_stream_maps("eng", audio_streams, subtitle_streams, codec="copy"),
-            ["-map", "0:v:0", "-map", "0:a:0"],
-        )
-
-    def test_copy_mode_with_all_keeps_video_and_all_audio(self):
-        audio_streams = [
-            {"tags": {"language": "eng"}},
-            {"tags": {"language": "spa"}},
-        ]
-        subtitle_streams = [
-            {"tags": {"language": "eng"}},
-        ]
-        self.assertEqual(
-            build_stream_maps("all", audio_streams, subtitle_streams, codec="copy"),
-            ["-map", "0:v:0", "-map", "0:a?"],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
