@@ -2692,15 +2692,50 @@
         return year ? `${title} ${year}` : title;
     }
 
+    // Snapshot of default URLs seeded before ms_searches_seen_defaults existed
+    // — used as its fallback value for a browser that already has ms_searches
+    // but no tracking yet, so those original defaults aren't mistaken for
+    // "new" and re-added after a deliberate delete.
+    const _PRE_TRACKING_DEFAULT_URLS = [
+        'https://nzbgeek.info/geekseek.php?moviesgeekseek=1&c=&browseincludewords={query}',
+        'https://www.imdb.com/find/?q={query}',
+        'https://www.thetvdb.com/search?query={query}',
+    ];
+
     function _getSearchSites() {
         const raw = localStorage.getItem('ms_searches');
+        // URLs of every default site ever introduced to this browser, whether
+        // still present or since deleted by the user — lets a newly added
+        // default (e.g. a future site added here) merge into existing users'
+        // lists once, without re-adding one someone deliberately removed.
+        const seenRaw = localStorage.getItem('ms_searches_seen_defaults');
+        let seen;
+        try {
+            seen = seenRaw === null
+                ? new Set(_PRE_TRACKING_DEFAULT_URLS)
+                : new Set(JSON.parse(seenRaw) || []);
+        } catch { seen = new Set(_PRE_TRACKING_DEFAULT_URLS); }
+
         if (raw === null) {
-            // First run — seed defaults without overwriting a deliberate empty list
+            // First run — seed all current defaults without overwriting a
+            // deliberate empty list.
             localStorage.setItem('ms_searches', JSON.stringify(_DEFAULT_SEARCH_SITES));
+            localStorage.setItem('ms_searches_seen_defaults', JSON.stringify(_DEFAULT_SEARCH_SITES.map(s => s.url)));
             return _DEFAULT_SEARCH_SITES;
         }
-        try { return JSON.parse(raw) || []; }
-        catch { return []; }
+
+        let sites;
+        try { sites = JSON.parse(raw) || []; }
+        catch { sites = []; }
+
+        const newDefaults = _DEFAULT_SEARCH_SITES.filter(s => !seen.has(s.url));
+        if (newDefaults.length) {
+            sites = sites.concat(newDefaults);
+            newDefaults.forEach(s => seen.add(s.url));
+            localStorage.setItem('ms_searches', JSON.stringify(sites));
+            localStorage.setItem('ms_searches_seen_defaults', JSON.stringify([...seen]));
+        }
+        return sites;
     }
     function _saveSearchSites(arr) { localStorage.setItem('ms_searches', JSON.stringify(arr)); }
 
