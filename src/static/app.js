@@ -1238,6 +1238,10 @@
                 const row = document.querySelector(`.file-entry[data-path="${CSS.escape(path)}"]`);
                 if (row) _imdbApplyBadge(row, info);
             }
+            // Ratings only exist once badges are applied — if the active sort
+            // is by rating, re-apply it now that this dir's ratings are in.
+            const activeBtn = document.querySelector('#global-sort-bar .sort-btn.active');
+            if (activeBtn?.dataset.sort === 'rating') _applySort('rating');
         } catch (_) { /* non-fatal */ }
     }
 
@@ -1945,7 +1949,7 @@
 
     // ── URL-based filter persistence ─────────────────────────────
     let _sortDir = 'asc';
-    const _sortDefaults = { name: 'asc', size: 'desc', date: 'desc' };
+    const _sortDefaults = { name: 'asc', size: 'desc', date: 'desc', rating: 'desc' };
 
     function updateUrl() {
         const params = new URLSearchParams();
@@ -2332,6 +2336,16 @@
         const reorder = (container, selector) => {
             const els = [...container.querySelectorAll(selector)];
             els.sort((a, b) => {
+                if (key === 'rating') {
+                    // Unrated files (no IMDb match, or a match with no rating)
+                    // always sort last, in either direction.
+                    const ra = a.dataset.imdbRating, rb = b.dataset.imdbRating;
+                    if (ra === undefined && rb === undefined) return 0;
+                    if (ra === undefined) return 1;
+                    if (rb === undefined) return -1;
+                    const cmp = parseFloat(ra) - parseFloat(rb);
+                    return _sortDir === 'asc' ? cmp : -cmp;
+                }
                 let cmp = 0;
                 if (key === 'name') cmp = a.dataset.name.localeCompare(b.dataset.name);
                 if (key === 'size') cmp = parseInt(a.dataset.size) - parseInt(b.dataset.size);
