@@ -17,6 +17,9 @@
              hx-target="find .dir-children"
              hx-swap="innerHTML">
         <summary>
+            <span class="batch-checkbox-cell">
+                <input type="checkbox" class="dir-batch-cb" onclick="dirBatchCbClick(event, this)">
+            </span>
             <span class="chevron">&#9654;</span>
             <span class="dir-name">{{ subdir.name }}/</span>
             <span class="dir-size-inline">{{ subdir.size }}</span>

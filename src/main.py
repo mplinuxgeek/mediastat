@@ -24,8 +24,10 @@ from typing import Optional
 import yaml
 from cropdetect_utils import default_cropdetect_limit, extract_cropdetect_values, choose_dominant_crop
 from encode_output_resolution import derive_output_resolution
-from encode_stream_selection import build_stream_maps
-from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter, suggest_qp
+from encode_stream_selection import build_stream_maps, subtitle_codec_args
+from ffmpeg_errors import summarize_ffmpeg_error
+import auto_encode
+from encode_estimate import sample_window, parse_ssim, build_ssim_ref_filter, suggest_qp, suggest_qp_auto, early_stop_ok, sweep_can_stop
 
 from contextlib import asynccontextmanager
 
@@ -43,6 +45,7 @@ _uvc_config.LOGGING_CONFIG.setdefault("loggers", {})[""] = {
 
 from fastapi import FastAPI, Form, Request, Query, HTTPException
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 import aiosqlite
@@ -123,7 +126,7 @@ def _concurrency(key: str, default: int) -> int:
 
 _PROBE_SEM = asyncio.Semaphore(_concurrency("probe_workers", 8))   # max parallel ffprobe processes
 _DU_SEM    = asyncio.Semaphore(_concurrency("disk_usage_workers", 8))   # max parallel du processes
-_SCAN_SEM  = asyncio.Semaphore(_concurrency("scan_workers", 4))   # max in-flight scan tasks (DB conn + ffprobe)
+_SCAN_SEM  = asyncio.Semaphore(_concurrency("scan_workers", 8))   # max in-flight scan tasks (DB conn + ffprobe)
 _STAT_SEM  = asyncio.Semaphore(_concurrency("stat_workers", 32))  # max parallel stat/db-check tasks
 IMDB_SEARCH_WORKERS = _concurrency("imdb_search_workers", 32)
 IMDB_MATCH_WRITE_WORKERS = _concurrency("imdb_match_write_workers", 16)
@@ -158,6 +161,75 @@ async def _list_dir(dir_path: Path) -> list[os.DirEntry]:
     return entries
 
 
+def _file_sort_key(e: os.DirEntry, dir_path: Path) -> str:
+    f_path = Path(e.path)
+    if f_path.parent != dir_path:
+        return f"{f_path.parent.name}/{e.name}".lower()
+    return e.name.lower()
+
+
+_SEASON_EXTRAS_RE = re.compile(
+    r"(?i)^(season\s*\d+|specials|extras|featurettes|behind\s*the\s*scenes|deleted\s*scenes|shorts|trailers|interviews)$"
+)
+
+
+async def _resolve_flattened_dir_contents(dir_path: Path) -> tuple[list[os.DirEntry], list[os.DirEntry], set[str]]:
+    """Concurrently scans dir_path and its subdirectories. For any subdirectory S that
+    contains no subdirectories and at least one media file, we flatten S by adding all
+    its media files to the parent directory's media files and omitting S from the
+    subdirectory list.
+    """
+    entries = await _list_dir(dir_path)
+    if not entries:
+        return [], [], set()
+
+    dirs = [e for e in entries if e.is_dir()]
+    mkv_files = [
+        e for e in entries
+        if e.is_file() and os.path.splitext(e.name)[1].lower() in MEDIA_EXTENSIONS
+    ]
+
+    if not dirs:
+        mkv_files.sort(key=lambda x: _file_sort_key(x, dir_path))
+        return [], mkv_files, set()
+
+    # Gather subdirectory contents concurrently
+    sub_listings = await asyncio.gather(
+        *[_list_dir(Path(d.path)) for d in dirs],
+        return_exceptions=True
+    )
+
+    remaining_dirs = []
+    show_dirs = set()
+    for d, sub_entries in zip(dirs, sub_listings):
+        if isinstance(sub_entries, Exception):
+            remaining_dirs.append(d)
+            continue
+
+        has_subdirs = any(e.is_dir() for e in sub_entries)
+        is_season_extra = bool(_SEASON_EXTRAS_RE.match(d.name))
+        if has_subdirs or is_season_extra:
+            show_dirs.add(d.name)
+
+        sub_mkv_files = [
+            e for e in sub_entries
+            if e.is_file() and os.path.splitext(e.name)[1].lower() in MEDIA_EXTENSIONS
+        ]
+
+        if not has_subdirs and sub_mkv_files and not is_season_extra:
+            mkv_files.extend(sub_mkv_files)
+        else:
+            remaining_dirs.append(d)
+
+    remaining_dirs.sort(key=lambda x: x.name.lower())
+    mkv_files.sort(key=lambda x: _file_sort_key(x, dir_path))
+
+    return remaining_dirs, mkv_files, show_dirs
+
+
+
+
+
 _duration_cache: dict[str, float] = {}  # path → duration, cached across seeks
 
 
@@ -179,6 +251,12 @@ async def lifespan(app: FastAPI):
                 _schedule_config.update(json.loads(row[0]))
             except Exception:
                 pass
+        elif os.environ.get("AUTO_WINDOW"):  # e.g. "23-7": default encode window when none saved
+            try:
+                a, b = os.environ["AUTO_WINDOW"].split("-")
+                _schedule_config.update({"enabled": True, "start": int(a), "end": int(b)})
+            except ValueError:
+                pass
     _hw_accel_info = await asyncio.to_thread(_detect_hw_accel_sync)
     hw = _hw_accel_info
     log.info("ffmpeg       : %s", "found" if shutil.which("ffmpeg") else "NOT FOUND — encoding unavailable")
@@ -193,7 +271,9 @@ async def lifespan(app: FastAPI):
     await _load_encode_jobs()
     worker = asyncio.create_task(_encode_worker())
     retention_task = asyncio.create_task(_retention_worker())
+    auto_task = asyncio.create_task(_auto_worker())
     yield
+    auto_task.cancel()
     worker.cancel()
     retention_task.cancel()
     try:
@@ -206,9 +286,48 @@ async def lifespan(app: FastAPI):
         pass
 
 app = FastAPI(lifespan=lifespan)
+
+
+class _SelectiveGZip:
+    """gzip the large, compressible responses — the directory listing (several
+    MB of HTML for a big folder), the IMDb match map and static assets.
+
+    Deliberately an allow-list rather than app-wide GZipMiddleware: this
+    Starlette version would also buffer the text/event-stream endpoints
+    (scan progress, encode events), delaying every progress update."""
+
+    _PATHS = {"/dir", "/imdb/matches", "/recently-added"}
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=5)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and (scope["path"] in self._PATHS or scope["path"].startswith("/static/")):
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(_SelectiveGZip)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.filters["pathquote"] = lambda p: quote(str(p), safe="")
+# Cache-buster for /static assets: changes whenever a new build ships different files.
+templates.env.globals["asset_version"] = str(int(max(
+    (f.stat().st_mtime for f in (Path(__file__).parent / "static").iterdir() if f.is_file()), default=0)))
+
+
+def _render_page(request: Request, template: str, active_tab: str, **context):
+    """Render a full page. Supplies what templates/_base.html needs on every
+    page: the ingress prefix, the action token and which nav tab is active."""
+    return templates.TemplateResponse(template, {
+        "request": request,
+        "ingress_path": request.state.ingress_path,
+        "delete_token": DELETE_TOKEN,
+        "active_tab": active_tab,
+        **context,
+    })
 
 
 @app.get("/healthz")
@@ -1630,13 +1749,8 @@ async def set_dates_status():
 
 @app.get("/imdb-scan")
 async def imdb_scan_page(request: Request):
-    return templates.TemplateResponse("imdb_scan.html", {
-        "request": request,
-        "ingress_path": request.state.ingress_path,
-        "delete_token": DELETE_TOKEN,
-        "tmdb_configured": bool(_config.get("tmdb_api_key")),
-        "active_tab": "imdb",
-    })
+    return _render_page(request, "imdb_scan.html", "imdb",
+                        tmdb_configured=bool(_config.get("tmdb_api_key")))
 
 
 @app.post("/imdb/scan-bg")
@@ -1829,6 +1943,11 @@ async def init_db():
         # Migration: add ffmpeg_cmd column to existing databases
         try:
             await db.execute("ALTER TABLE encode_jobs ADD COLUMN ffmpeg_cmd TEXT")
+        except Exception:
+            pass  # column already exists
+        # Migration: add error_log column (ffmpeg stderr tail of failed jobs)
+        try:
+            await db.execute("ALTER TABLE encode_jobs ADD COLUMN error_log TEXT")
         except Exception:
             pass  # column already exists
         await db.commit()
@@ -2073,11 +2192,21 @@ async def dir_total_size(path: Path) -> int:
     return result
 
 
-async def _probe_file(db: aiosqlite.Connection, f: Path) -> dict | None:
+async def _probe_file(db: aiosqlite.Connection, f: Path, dir_path: Path = None) -> dict | None:
     try:
         meta = await get_file_meta(db, f)
-        meta["name"] = f.name
-        meta["stem"] = f.stem
+        f_parent = f.parent
+        if dir_path and f_parent != dir_path:
+            parent_name = f_parent.name
+            if f.stem.lower() == parent_name.lower():
+                display_stem = f.stem
+            else:
+                display_stem = f"{parent_name}/{f.stem}"
+            meta["name"] = f"{parent_name}/{f.name}"
+            meta["stem"] = display_stem
+        else:
+            meta["name"] = f.name
+            meta["stem"] = f.stem
         meta["ext"]  = f.suffix.lower()
         meta["human_size"]  = human_size(meta.get("size") or 0)
         meta["size_class"]  = size_css_class(meta.get("size") or 0)
@@ -2093,21 +2222,14 @@ async def _probe_file(db: aiosqlite.Connection, f: Path) -> dict | None:
         return None
 
 
+
 async def scan_dir(dir_path: Path) -> tuple[dict, list[dict]]:
     """Single iterdir() — returns (contents, cached_files).
 
     No stat() calls, no du — just a directory listing plus a DB lookup.
     Staleness is handled by the background /dir-check endpoint.
     """
-    entries = await _list_dir(dir_path)
-    if not entries and not dir_path.is_dir():
-        return {"subdirs": [], "file_count": 0}, []
-
-    dirs      = sorted([e for e in entries if e.is_dir()],  key=lambda x: x.name.lower())
-    mkv_files = sorted(
-        [e for e in entries if e.is_file() and os.path.splitext(e.name)[1].lower() in MEDIA_EXTENSIONS],
-        key=lambda x: x.name.lower(),
-    )
+    dirs, mkv_files, _ = await _resolve_flattened_dir_contents(dir_path)
 
     subdirs = [{"path": Path(d.path), "name": d.name, "size": "?", "size_bytes": -1, "mtime": 0}
                for d in dirs]
@@ -2131,9 +2253,22 @@ async def scan_dir(dir_path: Path) -> tuple[dict, list[dict]]:
         row = by_path.get(f.path)
         if not row:
             continue
-        stem, ext = os.path.splitext(f.name)
-        row["name"]            = f.name
-        row["stem"]            = stem
+        
+        f_parent = Path(f.path).parent
+        if f_parent != dir_path:
+            parent_name = f_parent.name
+            stem, ext = os.path.splitext(f.name)
+            if stem.lower() == parent_name.lower():
+                display_stem = stem
+            else:
+                display_stem = f"{parent_name}/{stem}"
+            row["name"]            = f"{parent_name}/{f.name}"
+            row["stem"]            = display_stem
+        else:
+            stem, ext = os.path.splitext(f.name)
+            row["name"]            = f.name
+            row["stem"]            = stem
+
         row["ext"]             = ext.lower()
         row["human_size"]      = human_size(row["size"])
         row["size_class"]      = size_css_class(row.get("size") or 0)
@@ -2148,59 +2283,109 @@ async def scan_dir(dir_path: Path) -> tuple[dict, list[dict]]:
     return contents, cached
 
 
+
+def _stat_mtimes(paths: list[str]) -> dict[str, float | None]:
+    """mtime for each path (None if it can't be stat'ed). Runs in a worker
+    thread; the stats themselves are fanned out so a slow network mount
+    doesn't serialise a thousand round trips."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(p: str) -> float | None:
+        try:
+            return os.stat(p).st_mtime
+        except OSError:
+            return None
+
+    if len(paths) < 16:
+        return {p: one(p) for p in paths}
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        return dict(zip(paths, pool.map(one, paths)))
+
+
+async def _scan_plan(dir_path: Path) -> tuple[list[os.DirEntry], list[str]]:
+    """Work out what a (re)scan of dir_path actually has to do.
+
+    Returns (to_probe, removed): the files with no up-to-date file_meta row,
+    and the cached paths shown under this directory that no longer exist on
+    disk. Files whose cached row still matches their mtime need nothing —
+    the page already shows them.
+    """
+    _, mkv_files, show_dirs = await _resolve_flattened_dir_contents(dir_path)
+    fs_paths = [e.path for e in mkv_files]
+
+    dir_prefix = str(dir_path) + "/"
+    escaped = dir_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT path, mtime FROM file_meta WHERE path LIKE ? ESCAPE '\\'",
+            (escaped + "%",),
+        ) as cur:
+            cached = {row[0]: row[1] for row in await cur.fetchall()}
+
+    mtimes = await asyncio.to_thread(_stat_mtimes, [p for p in fs_paths if p in cached])
+    to_probe = [e for e in mkv_files if e.path not in cached or mtimes.get(e.path) != cached[e.path]]
+
+    # Same "which cached rows belong to this listing" rule as /dir-check:
+    # direct children, plus one level down for flattened subfolders.
+    fs_set = set(fs_paths)
+    removed = []
+    for path_str in cached:
+        if path_str in fs_set:
+            continue
+        parts = path_str[len(dir_prefix):].split("/")
+        if len(parts) == 1 or (len(parts) == 2 and parts[0] not in show_dirs):
+            removed.append(path_str)
+    return to_probe, removed
+
+
 async def _file_scan_events(dir_path: Path, request: Request):
-    """Async generator yielding SSE events as MKV files are probed."""
-    entries = await _list_dir(dir_path)
-    if not entries and not dir_path.is_dir():
-        yield f"data: {json.dumps({'type': 'done', 'html': ''})}\n\n"
-        return
+    """Async generator yielding SSE events as media files are probed.
 
-    mkv_files = sorted(
-        [f for f in entries if f.is_file() and os.path.splitext(f.name)[1].lower() in MEDIA_EXTENSIONS],
-        key=lambda x: x.name.lower(),
-    )
-    total = len(mkv_files)
-
-    if total == 0:
-        yield f"data: {json.dumps({'type': 'done', 'html': ''})}\n\n"
-        return
+    Incremental: only files that are new or whose mtime changed are probed
+    and sent (one `progress` event each, carrying that row's HTML). Rows for
+    files that vanished are dropped from the cache and listed in the final
+    `done` event so the page can remove them. Unchanged files produce no
+    events at all — adding one film to a 1000-film folder is one probe and
+    one row, not a re-send of the whole listing.
+    """
+    to_probe, removed = await _scan_plan(dir_path)
+    total = len(to_probe)
 
     yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
-    queue: asyncio.Queue = asyncio.Queue()
-    done_count = 0
-    files_meta: list[dict] = []
-
     async with aiosqlite.connect(DB_PATH) as db:
-        async def probe_one(f) -> None:
-            async with _STAT_SEM:
-                try:
-                    meta = await _probe_file(db, Path(f.path))
-                except Exception:
-                    meta = None
-            await queue.put(meta)
+        if removed:
+            await db.executemany("DELETE FROM file_meta WHERE path = ?", [(p,) for p in removed])
+            await db.commit()
 
-        tasks = [asyncio.create_task(probe_one(f)) for f in mkv_files]
+        if total:
+            queue: asyncio.Queue = asyncio.Queue()
+            row_template = templates.env.get_template("_files_table.html")
 
-        for _ in range(total):
-            if await request.is_disconnected():
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                return
-            meta = await queue.get()
-            done_count += 1
-            file_html = ""
-            if meta:
-                files_meta.append(meta)
-                file_html = templates.env.get_template("_files_table.html").render(files=[meta])
-            yield f"data: {json.dumps({'type': 'progress', 'done': done_count, 'total': total, 'file_html': file_html})}\n\n"
+            async def probe_one(f) -> None:
+                async with _STAT_SEM:
+                    try:
+                        meta = await _probe_file(db, Path(f.path), dir_path)
+                    except Exception:
+                        meta = None
+                await queue.put(meta)
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [asyncio.create_task(probe_one(f)) for f in to_probe]
 
-    files_meta.sort(key=lambda x: x["name"].lower())
-    html = templates.env.get_template("_files_table.html").render(files=files_meta)
-    yield f"data: {json.dumps({'type': 'done', 'html': html})}\n\n"
+            for done_count in range(1, total + 1):
+                if await request.is_disconnected():
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    return
+                meta = await queue.get()
+                file_html = row_template.render(files=[meta]) if meta else ""
+                yield f"data: {json.dumps({'type': 'progress', 'done': done_count, 'total': total, 'file_html': file_html})}\n\n"
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    yield f"data: {json.dumps({'type': 'done', 'removed': removed})}\n\n"
+
 
 
 def safe_path(path: str) -> Path:
@@ -2223,15 +2408,10 @@ def safe_path(path: str) -> Path:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "media_root": str(current_root),
-        "configured_dirs": CONFIGURED_DIRS,
-        "delete_token": DELETE_TOKEN,
-        "error": request.query_params.get("error"),
-        "ingress_path": request.state.ingress_path,
-        "active_tab": "library",
-    })
+    return _render_page(request, "index.html", "library",
+                        media_root=str(current_root),
+                        configured_dirs=CONFIGURED_DIRS,
+                        error=request.query_params.get("error"))
 
 
 @app.post("/set-root")
@@ -2304,8 +2484,8 @@ async def dir_check(path: str = Query(...)):
     if not dir_path.is_dir():
         raise HTTPException(status_code=404)
 
-    entries = await _list_dir(dir_path)
-    fs_paths = {e.path for e in entries if e.is_file() and os.path.splitext(e.name)[1].lower() in MEDIA_EXTENSIONS}
+    remaining_dirs, mkv_files, show_dirs = await _resolve_flattened_dir_contents(dir_path)
+    fs_paths = {e.path for e in mkv_files}
 
     dir_prefix = str(dir_path) + "/"
     escaped = dir_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -2315,9 +2495,21 @@ async def dir_check(path: str = Query(...)):
             (escaped + "%",),
         ) as cur:
             rows = await cur.fetchall()
-    db_paths = {row[0] for row in rows if "/" not in row[0][len(dir_prefix):]}
+
+    db_paths = set()
+    for row in rows:
+        path_str = row[0]
+        rel = path_str[len(dir_prefix):]
+        parts = rel.split('/')
+        if len(parts) == 1:
+            db_paths.add(path_str)
+        elif len(parts) == 2:
+            if parts[0] not in show_dirs:
+                db_paths.add(path_str)
 
     return {"changed": fs_paths != db_paths}
+
+
 
 
 @app.get("/dir-scan")
@@ -2693,7 +2885,7 @@ class EncodeJob:
         "eta", "encoder", "input_size", "output_size",
         "started_at", "finished_at", "error", "created_at",
         "input_media_info", "output_width", "output_height", "moved",
-        "ffmpeg_cmd",
+        "ffmpeg_cmd", "error_log",
         "_proc", "_task",
     )
 
@@ -2722,6 +2914,7 @@ class EncodeJob:
         self.output_height = int(config.get("_derived_output_height") or 0)
         self.moved: bool = False
         self.ffmpeg_cmd: str = ""
+        self.error_log: str = ""  # tail of ffmpeg's stderr when the job failed
         self._proc = None
         self._task = None
 
@@ -2786,12 +2979,12 @@ async def _save_encode_job(job: EncodeJob) -> None:
         await db.execute(
             """INSERT OR REPLACE INTO encode_jobs
                (id, input_path, output_path, config, status, encoder,
-                input_size, output_size, started_at, finished_at, error, created_at, ffmpeg_cmd)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                input_size, output_size, started_at, finished_at, error, created_at, ffmpeg_cmd, error_log)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job.id, job.input_path, job.output_path,
              json.dumps(job.config), job.status, job.encoder,
              job.input_size, job.output_size,
-             job.started_at, job.finished_at, job.error, job.created_at, job.ffmpeg_cmd),
+             job.started_at, job.finished_at, job.error, job.created_at, job.ffmpeg_cmd, job.error_log),
         )
         await db.commit()
 
@@ -2860,6 +3053,8 @@ async def _load_encode_jobs() -> None:
         job.error       = row["error"]
         if "ffmpeg_cmd" in row.keys():
             job.ffmpeg_cmd = row["ffmpeg_cmd"] or ""
+        if "error_log" in row.keys():
+            job.error_log = row["error_log"] or ""
         _encode_jobs[job.id] = job
 
     # Re-queue anything that was in-flight when the server last stopped
@@ -3054,8 +3249,9 @@ async def _encode_worker() -> None:
             if not _encode_queue_list:   # re-check after clear to avoid race
                 await _encode_queue_event.wait()
             continue
-        # Respect encode schedule
-        if not _schedule_active():
+        # Respect encode schedule (manual "Go" jobs from the auto page run immediately)
+        head = _encode_jobs.get(_encode_queue_list[0])
+        if not _schedule_active() and not (head and head.config.get("_manual")):
             await asyncio.sleep(60)
             continue
         job_id = _encode_queue_list[0]
@@ -3261,11 +3457,14 @@ def _build_ffmpeg_cmd(
         # Also set container-level color metadata for all paths
         cmd += color_meta
 
-    # Copy all audio/subtitle streams; -ignore_unknown drops streams the
-    # container doesn't support (e.g. PGS subs in MP4) rather than failing.
-    cmd += ["-c:a", "copy", "-c:s", "copy"]
+    # Copy all audio/subtitle streams, converting only the subtitle tracks the
+    # output container can't hold (e.g. MP4 mov_text going into MKV, which
+    # otherwise fails the whole encode at "could not write header").
+    # -ignore_unknown skips streams of unknown type rather than failing.
     lang = config.get("lang")
-    cmd += build_stream_maps(lang, a_streams, s_streams)
+    stream_maps = build_stream_maps(lang, a_streams, s_streams)
+    cmd += ["-c:a", "copy"] + subtitle_codec_args(stream_maps, s_streams, Path(output_path).suffix)
+    cmd += stream_maps
     cmd += ["-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]
@@ -3447,7 +3646,7 @@ def _broadcast_estimate() -> None:
             pass
 
 
-async def _run_estimate(path: str, config: dict) -> None:
+async def _run_estimate(path: str, config: dict, auto: bool = False, max_qp: int | None = None) -> None:
     global _estimate_state, _estimate_proc
     tmp_dir: Optional[str] = None
 
@@ -3506,6 +3705,8 @@ async def _run_estimate(path: str, config: dict) -> None:
         for qp in _ESTIMATE_QPS:
             if _cancelled():
                 return
+            if auto and max_qp and qp > max_qp:
+                break  # the automatic pipeline never goes above its QP cap
 
             _estimate_state["status"] = "encoding"
             _estimate_state["current_qp"] = qp
@@ -3603,8 +3804,14 @@ async def _run_estimate(path: str, config: dict) -> None:
                 "estimated_full_bytes": int(source_size * (out_bytes / sample_raw_bytes)) if sample_raw_bytes else None,
             })
             _broadcast_estimate()
+            if qp == _ESTIMATE_QPS[0] and early_stop_ok(_estimate_state["results"][-1], source_size):
+                break  # lowest QP already good and small enough; skip the rest of the sweep
+            if auto and sweep_can_stop(_estimate_state["results"]):
+                break  # quality already dropped past the window; higher QPs can't qualify
 
-        suggested_qp, warning = suggest_qp(_estimate_state["results"], _ESTIMATE_SSIM_THRESHOLD)
+        suggested_qp, warning = suggest_qp_auto(
+            _estimate_state["results"], source_size, info["duration_sec"],
+            info["media_info"].get("width"), info["is_hdr"], max_qp=max_qp if auto else None)
         _estimate_state["status"] = "done"
         _estimate_state["suggested_qp"] = suggested_qp
         _estimate_state["warning"] = warning
@@ -3814,13 +4021,13 @@ async def _run_encode_job(job_id: str) -> None:
                     pass
             else:
                 job.status = "failed"
-                err_lines = [l for l in stderr_lines if any(
-                    kw in l.lower() for kw in ("error", "failed", "invalid", "cannot", "unable")
-                )]
-                detail = (err_lines[-1] if err_lines else stderr_lines[-1]) if stderr_lines else ""
+                detail = summarize_ffmpeg_error(stderr_lines)
                 job.error = f"ffmpeg exited with code {proc.returncode}" + (f": {detail}" if detail else "")
+                # Keep the tail for the Jobs / Auto pages — the one-line
+                # summary above is a best guess, this is the evidence.
+                job.error_log = "\n".join(stderr_lines[-40:])
                 if stderr_lines:
-                    log.error("Encode %s stderr tail:\n%s", job_id[:8], "\n".join(stderr_lines[-20:]))
+                    log.error("Encode %s stderr tail:\n%s", job_id[:8], job.error_log)
 
     except asyncio.CancelledError:
         job.status = "cancelled"
@@ -4158,21 +4365,12 @@ async def encode_info():
 
 @app.get("/encode", response_class=HTMLResponse)
 async def encode_page(request: Request):
-    return templates.TemplateResponse("encode.html", {
-        "request": request,
-        "delete_token": DELETE_TOKEN,
-        "ingress_path": request.state.ingress_path,
-        "active_tab": "jobs",
-    })
+    return _render_page(request, "encode.html", "jobs")
 
 
 @app.get("/databases", response_class=HTMLResponse)
 async def databases_page(request: Request):
-    return templates.TemplateResponse("databases.html", {
-        "request": request,
-        "ingress_path": request.state.ingress_path,
-        "active_tab": "db",
-    })
+    return _render_page(request, "databases.html", "system")
 
 
 _dbclean_progress: dict = {"phase": "idle", "checked": 0, "total": 0,
@@ -4552,10 +4750,11 @@ async def start_encode(request: Request, path: str = Query(...)):
         _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
         base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
-    candidate = file_path.parent / f"{base_stem}.{fmt}"
+    out_dir = file_path.parent
+    candidate = out_dir / f"{base_stem}.{fmt}"
     counter = 2
     while str(candidate) in active_outputs or candidate.exists():
-        candidate = file_path.parent / f"{base_stem}-{counter}.{fmt}"
+        candidate = out_dir / f"{base_stem}-{counter}.{fmt}"
         counter += 1
     output_path = candidate
     job_id = secrets.token_hex(8)
@@ -4649,16 +4848,17 @@ def _make_encode_config(body: dict) -> dict:
     }
 
 
-def _queue_file_encode(file_path: Path, config: dict) -> str | None:
+def _queue_file_encode(file_path: Path, config: dict, output_dir: Path | None = None) -> str | None:
     """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
     fmt = config["format"]
     _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
     base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
     active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
-    candidate = file_path.parent / f"{base_stem}.{fmt}"
+    out_dir = output_dir or file_path.parent
+    candidate = out_dir / f"{base_stem}.{fmt}"
     counter = 2
     while str(candidate) in active_outputs or candidate.exists():
-        candidate = file_path.parent / f"{base_stem}-{counter}.{fmt}"
+        candidate = out_dir / f"{base_stem}-{counter}.{fmt}"
         counter += 1
     job_id = secrets.token_hex(8)
     job = EncodeJob(job_id, str(file_path), str(candidate), config)
@@ -4742,6 +4942,7 @@ def _reset_job_for_retry(job: EncodeJob) -> None:
     job.started_at = 0.0
     job.finished_at = None
     job.error = None
+    job.error_log = ""
     job._proc = None
 
 
@@ -5158,6 +5359,587 @@ async def health_check(request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Automatic re-encode pipeline (scan -> estimate -> encode -> verify -> replace)
+# ---------------------------------------------------------------------------
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, "1" if default else "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+_AUTO = {
+    "enabled": _env_bool("AUTO_ENCODE", False),  # default only: the switch on the Auto page overrides it once saved
+    "dry_run": _env_bool("AUTO_DRY_RUN", True),  # decide + log only; nothing is encoded or replaced
+    "dirs": [d for d in os.environ.get("AUTO_DIRS", "").split(":") if d],
+    "min_bytes": int(float(os.environ.get("AUTO_MIN_GB", "15")) * 1e9),
+    "preset": os.environ.get("AUTO_PRESET", "archive"),
+    "scratch": os.environ.get("AUTO_SCRATCH", "/scratch"),
+    "trash_days": float(os.environ.get("AUTO_TRASH_DAYS", "7")),
+    "min_free_bytes": int(float(os.environ.get("AUTO_MIN_FREE_GB", "0")) * 1e9),  # below this, trash is purged oldest first; 0 = off
+    "max_qp": int(os.environ.get("AUTO_MAX_QP", "20")),  # the auto pipeline never picks a QP above this
+    "interval": int(os.environ.get("AUTO_INTERVAL", "300")),
+    "plex_conf": os.environ.get("AUTO_PLEX_CONF", "/data/plex.json"),
+    "scan_hours": float(os.environ.get("AUTO_SCAN_HOURS", "3")),
+    "paused": False,
+}
+_auto_scan_now = asyncio.Event()
+_auto_lock = asyncio.Lock()  # one evaluate/finalize/manual run at a time (they share _estimate_state)
+_auto_finalize_failures: dict[str, int] = {}
+_AUTO_FINALIZE_RETRIES = 5
+_AUTO_SCRATCH_HEADROOM = 2e9
+_auto_state: dict = {"status": "idle", "current": None, "note": ""}
+
+
+async def _auto_notify(message: str) -> None:
+    """Best-effort webhook message (same receiver as encode job webhooks)."""
+    if not WEBHOOK_URL:
+        return
+    if WEBHOOK_STYLE == "discord":
+        body, headers = json.dumps({"content": message}).encode(), {"Content-Type": "application/json"}
+    elif WEBHOOK_STYLE == "ntfy":
+        body, headers = message.encode(), {"Title": "mediastat auto encode"}
+    else:
+        body, headers = json.dumps({"event": "auto_encode", "message": message}).encode(), {"Content-Type": "application/json"}
+    try:
+        await asyncio.to_thread(_post_webhook_sync, WEBHOOK_URL, body, headers)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Auto encode webhook notify failed: %s", e)
+
+
+async def _auto_db_init() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""CREATE TABLE IF NOT EXISTS auto_files (
+            path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, state TEXT, qp INTEGER,
+            est_bytes INTEGER, reason TEXT, job_id TEXT, saved_bytes INTEGER, updated_at REAL)""")
+        try:
+            await db.execute("ALTER TABLE auto_files ADD COLUMN trashed TEXT")
+        except aiosqlite.OperationalError:
+            pass  # column already there
+        await db.commit()
+
+
+async def _auto_set(path: str, size: int, mtime: int, state: str, **kw) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO auto_files (path,size,mtime,state,qp,est_bytes,reason,job_id,saved_bytes,updated_at,trashed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, state=excluded.state,
+                 qp=excluded.qp, est_bytes=excluded.est_bytes, reason=excluded.reason, job_id=excluded.job_id,
+                 saved_bytes=excluded.saved_bytes, updated_at=excluded.updated_at, trashed=excluded.trashed""",
+            (path, size, mtime, state, kw.get("qp"), kw.get("est_bytes"), kw.get("reason"),
+             kw.get("job_id"), kw.get("saved_bytes"), time.time(), kw.get("trashed")))
+        await db.commit()
+
+
+async def _auto_rows(where: str = "", args: tuple = ()) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f"SELECT * FROM auto_files {where}", args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+def _auto_roots() -> list[str]:
+    return list(_AUTO["dirs"])
+
+
+async def _auto_finalize(row: dict, job: "EncodeJob") -> None:
+    path = Path(row["path"])
+    size, mtime = row["size"], row["mtime"]
+    if job.status in ("failed", "cancelled"):
+        await _auto_set(row["path"], size, mtime, "failed", qp=row["qp"], reason=f"encode {job.status}: {job.error}", job_id=job.id)
+        await _auto_notify(f"❌ Auto encode failed: {path.name} ({job.status}: {job.error})")
+        return
+    out = Path(job.output_path)
+    keep_output = False
+    try:
+        st = path.stat() if path.exists() else None
+        if st is None or st.st_size != size or int(st.st_mtime) != mtime:
+            raise RuntimeError("source changed or disappeared during encode; leaving it alone")
+        src_info, out_info = await _probe_video(path), await _probe_video(out)
+        out_size = out.stat().st_size
+        maps = build_stream_maps(job.config.get("lang"), src_info["a_streams"], src_info["s_streams"])
+        want_a, want_s = auto_encode.expected_stream_counts(maps, len(src_info["a_streams"]), len(src_info["s_streams"]))
+        ok, why = auto_encode.verify_output(src_info, out_info, size, out_size, expected_audio=want_a, expected_subs=want_s)
+        if not ok:
+            await _auto_set(row["path"], size, mtime, "verify_failed", qp=row["qp"], reason=why, job_id=job.id)
+            await _auto_notify(f"⚠️ Auto encode rejected: {path.name} ({why})")
+            return
+        # replace_original copies the output next to the original before trashing it: make room first
+        need = int(out_size + _AUTO_SCRATCH_HEADROOM)
+        dev = os.stat(path.parent).st_dev
+        if _AUTO["min_free_bytes"] > 0 and shutil.disk_usage(path.parent).free < need:
+            for gone in await asyncio.to_thread(auto_encode.purge_trash_for_space, _auto_roots(), need, 0, dev):
+                log.warning("AUTO making room for replace: purged trash %s", gone)
+        if shutil.disk_usage(path.parent).free < need:
+            raise OSError(f"not enough free space in {path.parent} to replace (need {need / 1e9:.1f} GB)")
+        final, trashed = await asyncio.to_thread(auto_encode.replace_original, out, path)
+        saved = size - final.stat().st_size
+        job.moved = True
+        msg = await asyncio.to_thread(auto_encode.plex_refresh, _AUTO["plex_conf"], str(final))
+        log.info("AUTO replaced %s: saved %.1f GB; original in %s; %s", path.name, saved / 1e9, trashed, msg)
+        st = final.stat()
+        await _auto_set(str(final), st.st_size, int(st.st_mtime), "replaced", qp=row["qp"], saved_bytes=saved,
+                        reason=f"original kept in {trashed.parent.name}; {msg}", job_id=job.id, trashed=str(trashed))
+        if str(final) != row["path"]:
+            await _auto_set(row["path"], size, mtime, "replaced", qp=row["qp"], saved_bytes=saved, reason=f"now {final.name}", job_id=job.id, trashed=str(trashed))
+        _auto_finalize_failures.pop(row["path"], None)
+        await _auto_notify(f"✅ Auto encode replaced: {final.name} (saved {saved / 1e9:.1f} GB)")
+    except Exception as exc:  # noqa: BLE001
+        # e.g. out of space: keep the encoded output and retry on the next step rather than losing hours of work
+        n = _auto_finalize_failures[row["path"]] = _auto_finalize_failures.get(row["path"], 0) + 1
+        log.error("AUTO finalize failed for %s (attempt %d): %s", path, n, exc, exc_info=True)
+        if n < _AUTO_FINALIZE_RETRIES:
+            keep_output = True
+            await _auto_set(row["path"], size, mtime, "queued", qp=row["qp"], est_bytes=row["est_bytes"], job_id=job.id,
+                            reason=f"finalize error (attempt {n}/{_AUTO_FINALIZE_RETRIES}, will retry): {exc}")
+        else:
+            keep_output = out.exists()
+            _auto_finalize_failures.pop(row["path"], None)
+            await _auto_set(row["path"], size, mtime, "verify_failed", qp=row["qp"], job_id=job.id,
+                            reason=f"finalize error: {exc}" + (f"; encoded file kept at {out}" if keep_output else ""))
+            await _auto_notify(f"❌ Auto encode could not replace {path.name}: {exc}")
+    finally:
+        if not keep_output:
+            out.unlink(missing_ok=True)
+
+
+async def _auto_load_settings() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key='auto_settings'") as cur:
+            row = await cur.fetchone()
+    if row:
+        try:
+            saved = json.loads(row[0])
+            # "enabled" is only present once the switch on the Auto page has
+            # been used; until then AUTO_ENCODE decides.
+            for k in ("enabled", "paused", "dry_run"):
+                if k in saved:
+                    _AUTO[k] = bool(saved[k])
+            # Thresholds saved from the Auto page override the AUTO_MIN_GB /
+            # AUTO_MAX_QP environment defaults.
+            for k in ("min_bytes", "max_qp"):
+                if k in saved:
+                    _AUTO[k] = int(saved[k])
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _auto_save_settings() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_settings', ?)",
+                         (json.dumps({"enabled": _AUTO["enabled"], "paused": _AUTO["paused"], "dry_run": _AUTO["dry_run"],
+                                      "min_bytes": _AUTO["min_bytes"], "max_qp": _AUTO["max_qp"]}),))
+        await db.commit()
+
+
+_AUTO_MIN_GB_RANGE = (0.1, 1000.0)
+_AUTO_MAX_QP_RANGE = (10, 40)
+
+
+async def _auto_set_thresholds(min_gb: float | None = None, max_qp: int | None = None) -> int:
+    """Change which files auto-encode considers. Returns how many undecided
+    rows were dropped because they are now under the size threshold.
+
+    Raising the minimum size removes files still waiting (pending /
+    would_encode) that no longer qualify — otherwise they would be encoded
+    anyway. Finished, failed, skipped and excluded rows are history and stay.
+    Lowering it needs a library scan to find the newly eligible files; the
+    caller triggers that. A lower max QP needs no cleanup: every place that
+    acts on a stored decision re-checks it against the current limit.
+    """
+    dropped = 0
+    if min_gb is not None:
+        lo, hi = _AUTO_MIN_GB_RANGE
+        _AUTO["min_bytes"] = int(max(lo, min(hi, float(min_gb))) * 1e9)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "DELETE FROM auto_files WHERE state IN ('pending', 'would_encode') AND size < ?", (_AUTO["min_bytes"],))
+            dropped = cur.rowcount
+            await db.commit()
+    if max_qp is not None:
+        lo, hi = _AUTO_MAX_QP_RANGE
+        _AUTO["max_qp"] = max(lo, min(hi, int(max_qp)))
+    return dropped
+
+
+async def _auto_scan() -> int:
+    """Walk the configured dirs and register new/changed big files as 'pending'."""
+    _auto_state["scanning"] = True
+    try:
+        found = await asyncio.to_thread(auto_encode.find_candidates, _auto_roots(), _AUTO["min_bytes"])
+        rows = await _auto_rows()
+        known = {(r["path"], r["size"], r["mtime"]) for r in rows}
+        in_flight = {r["path"] for r in rows if r["state"] in ("queued", "estimating", "excluded")}  # not mid-encode, not opted out
+        added = 0
+        for c in found:
+            if (c["path"], c["size"], c["mtime"]) not in known and c["path"] not in in_flight:
+                await _auto_set(c["path"], c["size"], c["mtime"], "pending")
+                added += 1
+        # drop rows for files that no longer exist (history of replaced files is kept)
+        stale = await asyncio.to_thread(lambda: [r["path"] for r in rows
+                                                 if r["state"] not in ("queued", "estimating", "replaced", "excluded") and not os.path.exists(r["path"])])
+        if stale:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.executemany("DELETE FROM auto_files WHERE path=?", [(p,) for p in stale])
+                await db.commit()
+        _auto_state["last_scan"] = time.time()
+        _auto_state["last_scan_found"] = len(found)
+        log.info("AUTO scan: %d candidate file(s), %d new/changed, %d stale row(s) pruned", len(found), added, len(stale))
+        return added
+    finally:
+        _auto_state["scanning"] = False
+
+
+async def _auto_queue(row: dict, qp: int, est: int | None, note: str, config: dict, manual: bool = False) -> None:
+    note = re.sub(r"\s*\[waiting for scratch space[^\]]*\]$", "", note or "")
+    try:
+        scratch_free = shutil.disk_usage(_AUTO["scratch"]).free
+    except OSError:
+        scratch_free = None
+    need = int((est or row["size"]) + _AUTO_SCRATCH_HEADROOM)
+    if scratch_free is not None and scratch_free < need:
+        await _auto_set(row["path"], row["size"], row["mtime"], "would_encode", qp=qp, est_bytes=est,
+                        reason=f"{note} [waiting for scratch space: {scratch_free / 1e9:.0f} GB free, need {need / 1e9:.0f} GB]".strip())
+        return
+    cfg = {**config, "qp": qp, **({"_manual": True} if manual else {})}
+    job_id = _queue_file_encode(Path(row["path"]), cfg, output_dir=Path(_AUTO["scratch"]))
+    if not job_id:
+        await _auto_set(row["path"], row["size"], row["mtime"], "error", reason="could not queue encode")
+        return
+    _enqueue_job(job_id)
+    await _auto_set(row["path"], row["size"], row["mtime"], "queued", qp=qp, est_bytes=est, reason=note, job_id=job_id)
+
+
+async def _auto_step() -> None:
+    """One unit of work: finalise finished jobs, else (if the encoder is idle) evaluate/queue the next file."""
+    for row in await _auto_rows("WHERE state='queued'"):
+        job = _encode_jobs.get(row["job_id"])
+        if job is None:
+            await _auto_set(row["path"], row["size"], row["mtime"], "failed", qp=row["qp"], reason="encode job vanished", job_id=row["job_id"])
+        elif job.status in ("done", "failed", "cancelled"):
+            _auto_state.update(status="finalizing", current=row["path"])
+            await _auto_finalize(row, job)
+    if not _AUTO["enabled"] or _AUTO["paused"] or not _schedule_active():
+        return  # finishing off results is fine; starting new work is not
+    if any(j.status in ("queued", "running") for j in _encode_jobs.values()):
+        return  # one encode at a time (also protects Frigate)
+    if _estimate_state.get("status") in ("starting", "probing", "extracting", "encoding"):
+        return
+    config = _make_encode_config({"preset": _AUTO["preset"], "codec": "hevc", "qp": 18})
+    if not _AUTO["dry_run"]:  # decisions made during a dry run can be acted on without re-estimating
+        for row in await _auto_rows("WHERE state='would_encode' ORDER BY size DESC LIMIT 1"):
+            p = Path(row["path"])
+            if p.exists() and p.stat().st_size == row["size"] and (row["qp"] or 0) <= _AUTO["max_qp"]:
+                await _auto_queue(row, row["qp"], row["est_bytes"], row["reason"] or "", config)
+            else:
+                await _auto_set(row["path"], row["size"], row["mtime"], "pending")
+            return
+    rows = await _auto_rows("WHERE state='pending' ORDER BY size DESC LIMIT 1")
+    _auto_state["pending"] = len(await _auto_rows("WHERE state='pending'"))
+    if not rows:
+        _auto_state.update(status="idle", current=None)
+        return
+    await _auto_evaluate(rows[0], live=not _AUTO["dry_run"], config=config)
+
+
+async def _auto_evaluate(row: dict, live: bool, config: dict, manual: bool = False) -> None:
+    """Probe + estimate one file, then record the decision (dry run) or queue the encode (live)."""
+    path, size, mtime = row["path"], row["size"], row["mtime"]
+    p = Path(path)
+    if not p.exists() or p.stat().st_size != size:
+        await _auto_set(path, size, mtime, "skipped", reason="file changed or removed since scan")
+        return
+    _auto_state.update(status="estimating", current=path)
+    await _auto_set(path, size, mtime, "estimating", reason="estimating…")
+    info = await _probe_video(p)
+    if not info["ok"]:
+        await _auto_set(path, size, mtime, "error", reason="ffprobe failed")
+        return
+    if info["media_info"].get("video_codec") in ("av1",):
+        await _auto_set(path, size, mtime, "skipped", reason="already AV1")
+        return
+    prefix = "Dolby Vision -> HDR10 (DV layer lost). " if info["is_dv"] else ""
+    _estimate_cancel_event.clear()
+    await _run_estimate(path, config, auto=True, max_qp=_AUTO["max_qp"])
+    st = _estimate_state
+    if st.get("status") != "done":
+        await _auto_set(path, size, mtime, "error", reason=f"estimate {st.get('status')}: {st.get('error') or ''}")
+        return
+    qp = st.get("suggested_qp")
+    chosen = next((r for r in st["results"] if r["qp"] == qp), None)
+    est = chosen["estimated_full_bytes"] if chosen else None
+    if qp is None:
+        await _auto_set(path, size, mtime, "skipped", reason=prefix + (st.get("warning") or "no worthwhile saving"))
+        return
+    note = prefix + (st.get("warning") or "")
+    if not live:
+        await _auto_set(path, size, mtime, "would_encode", qp=qp, est_bytes=est, reason=note or None)
+        return
+    await _auto_queue(row, qp, est, note, config, manual=manual)
+
+
+async def _auto_refresh_disk() -> None:
+    """Cache free space (cheap, every loop) and trash size (a directory walk, every 10 min) for the status page."""
+    free = []
+    for root in _auto_roots():
+        try:
+            free.append(shutil.disk_usage(root).free)
+        except OSError:
+            pass
+    _auto_state["free_bytes"] = min(free) if free else None
+    try:
+        _auto_state["scratch_free_bytes"] = shutil.disk_usage(_AUTO["scratch"]).free
+    except OSError:
+        _auto_state["scratch_free_bytes"] = None
+    if time.time() - _auto_state.get("trash_checked", 0) >= 600:
+        _auto_state["trash_bytes"] = await asyncio.to_thread(auto_encode.trash_usage, _auto_roots())
+        _auto_state["trash_checked"] = time.time()
+
+
+async def _auto_worker() -> None:
+    await _auto_db_init()
+    await _auto_load_settings()
+    async with aiosqlite.connect(DB_PATH) as db:  # earlier versions skipped Dolby Vision; those files are fair game now
+        await db.execute("DELETE FROM auto_files WHERE state='skipped' AND reason LIKE 'Dolby Vision%'")
+        await db.execute("UPDATE auto_files SET reason=NULL WHERE reason='dry run'")  # old placeholder leaked into live rows
+        await db.execute("UPDATE auto_files SET state='pending', reason=NULL WHERE state='estimating'")  # interrupted by a restart
+        await db.commit()
+    last_step = 0.0
+    while True:
+        try:
+            await asyncio.wait_for(_auto_scan_now.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            pass
+        forced = _auto_scan_now.is_set()
+        _auto_scan_now.clear()
+        if not _AUTO["dirs"]:
+            continue
+        if not _AUTO["enabled"]:
+            # Switched off: no scanning, no purging, no new work. An encode
+            # that was already queued is still finalised, so a finished file
+            # is not left stranded in scratch.
+            try:
+                if await _auto_rows("WHERE state='queued'"):
+                    async with _auto_lock:
+                        await _auto_step()
+                if not _auto_manual_flag["on"]:
+                    _auto_state.update(status="disabled", current=None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.error("AUTO worker error: %s", exc, exc_info=True)
+                _auto_state.update(status="error", note=str(exc))
+            continue
+        try:
+            if forced or time.time() - _auto_state.get("last_scan", 0) >= _AUTO["scan_hours"] * 3600:
+                await _auto_scan()
+            if not _AUTO["dry_run"] and not _AUTO["paused"]:
+                await asyncio.to_thread(auto_encode.purge_trash, _auto_roots(), _AUTO["trash_days"])
+                gone = await asyncio.to_thread(auto_encode.purge_trash_for_space, _auto_roots(), _AUTO["min_free_bytes"]) \
+                    if _AUTO["min_free_bytes"] > 0 else []
+                for g in gone:
+                    log.warning("AUTO low disk space: purged trash %s", g)
+                if gone:
+                    await _auto_notify(f"🧹 Auto encode: disk below {_AUTO['min_free_bytes'] / 1e9:.0f} GB free, purged {len(gone)} old trash item(s)")
+                    _auto_state["trash_checked"] = 0  # refresh the trash size shown on the page
+            await _auto_refresh_disk()
+            if time.time() - last_step >= _AUTO["interval"] or forced:
+                last_step = time.time()
+                async with _auto_lock:
+                    await _auto_step()
+                if not _auto_manual_flag["on"]:
+                    _auto_state.update(status="paused" if _AUTO["paused"] else ("idle" if _schedule_active() else "waiting for window"), current=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error("AUTO worker error: %s", exc, exc_info=True)
+            _auto_state.update(status="error", note=str(exc))
+
+
+def _check_token(request: Request) -> None:
+    if request.headers.get("X-Delete-Token") != DELETE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.post("/auto/settings")
+async def auto_settings(request: Request):
+    _check_token(request)
+    body = await request.json()
+    if "enabled" in body:
+        enabled = bool(body["enabled"])
+        if enabled and not _AUTO["dirs"]:
+            raise HTTPException(status_code=400, detail="AUTO_DIRS is not set, so there is nothing to auto encode")
+        if enabled and not _AUTO["enabled"]:
+            _auto_scan_now.set()  # pick up where the library is now instead of waiting for the next tick
+        _AUTO["enabled"] = enabled
+    if "paused" in body:
+        _AUTO["paused"] = bool(body["paused"])
+    if "dry_run" in body:
+        _AUTO["dry_run"] = bool(body["dry_run"])
+    if "start" in body or "end" in body:
+        _schedule_config.update({"enabled": True, "start": max(0, min(23, int(body.get("start", _schedule_config["start"])))),
+                                 "end": max(0, min(23, int(body.get("end", _schedule_config["end"]))))})
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('encode_schedule', ?)", (json.dumps(_schedule_config),))
+            await db.commit()
+    dropped = 0
+    if "min_gb" in body or "max_qp" in body:
+        try:
+            dropped = await _auto_set_thresholds(body.get("min_gb"), body.get("max_qp"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="min_gb and max_qp must be numbers")
+        if "min_gb" in body:
+            _auto_scan_now.set()  # a lower threshold only takes effect once the library is re-walked
+    await _auto_save_settings()
+    return {"enabled": _AUTO["enabled"], "paused": _AUTO["paused"], "dry_run": _AUTO["dry_run"], "schedule": _schedule_config,
+            "min_gb": _AUTO["min_bytes"] / 1e9, "max_qp": _AUTO["max_qp"], "dropped": dropped}
+
+
+@app.post("/auto/scan")
+async def auto_scan_now(request: Request):
+    _check_token(request)
+    _auto_scan_now.set()
+    return {"status": "scan requested"}
+
+
+@app.get("/auto/status")
+async def auto_status():
+    rows = await _auto_rows("ORDER BY CASE state WHEN 'queued' THEN 0 WHEN 'would_encode' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END, "
+                            "CASE WHEN state='pending' THEN -size ELSE -updated_at END LIMIT 1000")
+    for r in rows:
+        job = _encode_jobs.get(r["job_id"]) if r.get("job_id") and r["state"] == "queued" else None
+        r["job"] = {"status": job.status, "progress": job.progress, "eta": job.eta, "fps": job.current_fps,
+                    "avg_fps": job.avg_fps, "encoder": job.encoder, "input_size": job.input_size,
+                    "output_size": job.output_size, "started_at": job.started_at} if job else None
+        # Failed rows: surface ffmpeg's own output while the job record still exists
+        failed_job = _encode_jobs.get(r["job_id"]) if r.get("job_id") and r["state"] in ("failed", "verify_failed", "error") else None
+        r["error_log"] = failed_job.error_log if failed_job else ""
+        r["ffmpeg_cmd"] = failed_job.ffmpeg_cmd if failed_job else ""
+    counts = {r["state"]: r["n"] for r in await _auto_rows_count()}
+    cfg = {k: v for k, v in _AUTO.items() if k != "plex_conf"}
+    est = _estimate_state
+    estimating = est.get("status") in ("probing", "extracting", "encoding")
+    return {"estimate": ({"file": os.path.basename(est.get("path") or ""), "qp": est.get("current_qp"), "progress": est.get("qp_progress"),
+                          "done": len(est.get("results") or []), "total": len(_ESTIMATE_QPS)} if estimating else None),
+            "config": cfg, "state": _auto_state, "schedule": _schedule_config, "counts": counts, "recent": rows}
+
+
+async def _auto_rows_count() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT state, COUNT(*) AS n FROM auto_files GROUP BY state") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def _auto_manual(row: dict) -> None:
+    try:
+        async with _auto_lock:
+            await _auto_manual_locked(row)
+    finally:
+        _auto_manual_flag["on"] = False
+
+
+async def _auto_manual_locked(row: dict) -> None:
+    try:
+        config = _make_encode_config({"preset": _AUTO["preset"], "codec": "hevc", "qp": 18})
+        p = Path(row["path"])
+        if row["state"] == "would_encode" and row["qp"] and row["qp"] <= _AUTO["max_qp"] and p.exists() and p.stat().st_size == row["size"]:
+            await _auto_queue(row, row["qp"], row["est_bytes"], row["reason"] or "", config, manual=True)
+        else:
+            _auto_manual_flag["on"] = True
+            await _auto_evaluate(row, live=True, config=config, manual=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("AUTO manual run failed for %s: %s", row["path"], exc, exc_info=True)
+        await _auto_set(row["path"], row["size"], row["mtime"], "error", reason=f"manual run failed: {exc}")
+    finally:
+        _auto_manual_flag["on"] = False
+        _auto_state.update(status="idle", current=None)
+
+
+_auto_manual_flag = {"on": False}
+
+
+@app.post("/auto/run")
+async def auto_run(request: Request):
+    """Manual 'Go' for one file: ignores pause and the run window."""
+    _check_token(request)
+    body = await request.json()
+    rows = await _auto_rows("WHERE path = ?", (str(body.get("path", "")),))
+    if not rows:
+        raise HTTPException(status_code=404, detail="File is not in the auto list")
+    row = rows[0]
+    if row["state"] not in ("pending", "would_encode", "skipped", "error", "failed", "verify_failed"):
+        raise HTTPException(status_code=409, detail=f"File is {row['state']}")
+    if _auto_lock.locked() or any(j.status in ("queued", "running") for j in _encode_jobs.values()) or _auto_manual_flag["on"] \
+            or _estimate_state.get("status") in ("starting", "probing", "extracting", "encoding"):
+        raise HTTPException(status_code=409, detail="The encoder is busy; try again when the current file finishes")
+    _auto_manual_flag["on"] = True
+    asyncio.create_task(_auto_manual(row))
+    return {"status": "estimating, then encoding" if row["state"] != "would_encode" else "queued"}
+
+
+@app.post("/auto/exclude")
+async def auto_exclude(request: Request):
+    """Mark a file 'do not encode' (or put it back in the pool)."""
+    _check_token(request)
+    body = await request.json()
+    rows = await _auto_rows("WHERE path = ?", (str(body.get("path", "")),))
+    if not rows:
+        raise HTTPException(status_code=404, detail="File is not in the auto list")
+    row = rows[0]
+    if row["state"] in ("queued", "estimating"):
+        raise HTTPException(status_code=409, detail=f"File is {row['state']}")
+    if body.get("excluded", True):
+        await _auto_set(row["path"], row["size"], row["mtime"], "excluded", reason="do not encode")
+        return {"state": "excluded"}
+    await _auto_set(row["path"], row["size"], row["mtime"], "pending")
+    _auto_scan_now.set()
+    return {"state": "pending"}
+
+
+@app.post("/auto/restore")
+async def auto_restore(request: Request):
+    """Put the trashed original of a replaced file back and mark the file 'do not encode'."""
+    _check_token(request)
+    body = await request.json()
+    rows = await _auto_rows("WHERE path = ?", (str(body.get("path", "")),))
+    if not rows:
+        raise HTTPException(status_code=404, detail="File is not in the auto list")
+    row = rows[0]
+    final = Path(row["path"])
+    if row["state"] != "replaced":
+        raise HTTPException(status_code=409, detail=f"File is {row['state']}")
+    trashed = Path(row["trashed"]) if row.get("trashed") else None
+    if trashed is None:
+        m = re.search(r"original kept in (\d{8}-\d{6})", row["reason"] or "")
+        trashed = auto_encode.find_trashed(final, m.group(1)) if m else None
+        if trashed is None:  # an '(orig -> now x.mkv)' history row points at the new file
+            m = re.search(r"now (.+)$", row["reason"] or "")
+            other = (await _auto_rows("WHERE path = ?", (str(final.parent / m.group(1)),))) if m else []
+            if other and other[0].get("trashed"):
+                trashed, final = Path(other[0]["trashed"]), final.parent / m.group(1)
+    if trashed is None or not trashed.is_file():
+        raise HTTPException(status_code=409, detail="The original is no longer in the trash")
+    try:
+        dest = await asyncio.to_thread(auto_encode.restore_original, final, trashed)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
+    st = dest.stat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM auto_files WHERE path IN (?, ?)", (str(final), row["path"]))
+        await db.commit()
+    await _auto_set(str(dest), st.st_size, int(st.st_mtime), "excluded", reason="original restored; do not encode")
+    msg = await asyncio.to_thread(auto_encode.plex_refresh, _AUTO["plex_conf"], str(dest))
+    log.info("AUTO restored %s from trash; %s", dest, msg)
+    return {"restored": str(dest), "plex": msg}
+
+
+@app.get("/auto", response_class=HTMLResponse)
+async def auto_page(request: Request):
+    return _render_page(request, "auto.html", "auto")
 
 
 if __name__ == "__main__":

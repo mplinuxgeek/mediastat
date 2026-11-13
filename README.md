@@ -24,7 +24,11 @@ sidebar), but also runs standalone in plain Docker.
 
 ```
 src/                  # application code (FastAPI app, templates, static assets)
-tests/                # pytest suite (194+ tests)
+  templates/_base.html #   shared page shell: header, nav (Library/Jobs/Auto/IMDb/System), theme
+  static/app.css       #   one stylesheet for every page (tokens + shared components)
+  static/core.js       #   shared JS: ingress shim, toasts, formatters, live Jobs badge
+  static/app.js        #   Library page only
+tests/                # pytest suite
 ha-addon/              # Home Assistant add-on packaging (config.yaml, Dockerfile, run.sh)
 Dockerfile             # standalone (non-HA) image, NVIDIA CUDA base
 docker-compose.yml     # standalone deployment via the root Dockerfile
@@ -59,6 +63,26 @@ Environment variables:
 | `MEDIA_ROOT`   | `/media`                          | Default browse root              |
 | `DB_PATH`      | `<app dir>/mediastat.db`          | SQLite file/job metadata cache   |
 | `CONFIG_PATH`  | `<app dir>/config.yaml`           | Path to the YAML config above    |
+
+Auto-encode (off unless `AUTO_ENCODE=1` or it is enabled on the Auto page):
+
+| Variable            | Default      | Purpose                                                              |
+|---------------------|--------------|----------------------------------------------------------------------|
+| `AUTO_ENCODE`       | `0`          | Enable the auto re-encode worker; the Enable/Disable switch on the Auto page overrides this once used |
+| `AUTO_DRY_RUN`      | `1`          | Decide and log only; the UI toggle overrides this once saved         |
+| `AUTO_DIRS`         | (none)       | Colon-separated library roots to scan                                |
+| `AUTO_MIN_GB`       | `15`         | Only consider files at least this big; the Auto page overrides this once saved |
+| `AUTO_PRESET`       | `archive`    | Encode preset                                                        |
+| `AUTO_SCRATCH`      | `/scratch`   | Where encodes are written before replacing the original              |
+| `AUTO_TRASH_DAYS`   | `7`          | Originals stay in `.mediastat-trash` this long                       |
+| `AUTO_MIN_FREE_GB`  | `0` (off)    | If > 0, below this free space the oldest trash (older than 24h) is purged |
+| `AUTO_MAX_QP`       | `20`         | The auto pipeline never picks a QP above this; the Auto page overrides this once saved |
+| `AUTO_INTERVAL`     | `300`        | Seconds between work steps                                           |
+| `AUTO_SCAN_HOURS`   | `3`          | Hours between library scans                                          |
+| `AUTO_PLEX_CONF`    | `/data/plex.json` | Plex refresh config                                             |
+| `AUTO_WINDOW`       | (none)       | Default run window, e.g. `23-7`                                      |
+
+When `webhook_url` is set, auto-encode also sends replaced / rejected / failed / trash-purged messages.
 
 Under the HA add-on, `config.yaml` is written from the add-on options UI on
 every start instead (see `ha-addon/run.sh`).

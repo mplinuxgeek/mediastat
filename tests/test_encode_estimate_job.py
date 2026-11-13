@@ -144,7 +144,9 @@ class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main._estimate_state["status"], "done")
         self.assertEqual(len(main._estimate_state["results"]), 9)
         self.assertEqual([r["qp"] for r in main._estimate_state["results"]], list(range(16, 25)))
-        self.assertEqual(main._estimate_state["suggested_qp"], 24)
+        # Fake encodes are the same size as the source, so there is no saving: auto mode suggests nothing.
+        self.assertIsNone(main._estimate_state["suggested_qp"])
+        self.assertIn("worthwhile saving", main._estimate_state["warning"])
         self.assertIsNone(main._estimate_state["error"])
 
         # Completing an estimate also stashes it in per-file history, so a
@@ -152,7 +154,7 @@ class RunEstimateTests(unittest.IsolatedAsyncioTestCase):
         cached = main._estimate_history.get("/tmp/does-not-exist.mkv")
         self.assertIsNotNone(cached)
         self.assertEqual(cached["status"], "done")
-        self.assertEqual(cached["suggested_qp"], 24)
+        self.assertIsNone(cached["suggested_qp"])
 
 
 class _FakeRequest:

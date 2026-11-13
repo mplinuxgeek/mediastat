@@ -1,32 +1,18 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediaStat</title>
+{% extends "_base.html" %}
+{% block title %}MediaStat{% endblock %}
+{% block head %}
     <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"
             integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
             crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"
             integrity="sha384-oJR5PTkR0gvqJ/UnX1IkFQgxg6BByX7jPWmgSSY5dz0+Yc7O3mloo717zZpF/xpb"
             crossorigin="anonymous"></script>
-    <link rel="stylesheet" href="{{ ingress_path }}/static/app.css">
-    <script>
-        // Applied before first paint to avoid a flash of the wrong theme.
-        // Explicit user choice (localStorage) wins; otherwise follows the OS.
-        (function () {
-            var saved = localStorage.getItem('mediastat_theme');
-            var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-            if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
-        })();
-    </script>
-</head>
-<body>
-    <header>
-        <span class="logo">▶ MediaStat</span>
-        <form class="path-form" action="/set-root" method="post">
+{% endblock %}
+{% block body %}
+    <div class="toolbar">
+        <form class="path-form" action="{{ ingress_path }}/set-root" method="post">
             {% if configured_dirs %}
-            <select class="path-input" name="path" onchange="this.form.submit()">
+            <select class="path-input" name="path" onchange="this.form.submit()" aria-label="Library folder" title="Library folder">
                 {% for d in configured_dirs %}
                 <option value="{{ d.path }}"{% if d.path == media_root %} selected{% endif %}>
                     {{- d.label or d.path -}}
@@ -44,35 +30,29 @@
                placeholder="search… try 1080p x265 -hdr" autocomplete="off" spellcheck="false"
                oninput="applyGlobalSearch()"
                title="Tokens: resolution (4k/1080p/720p/sd), codec (h265/h264/av1/vp9), HDR (hdr/dv/hlg/sdr). Prefix with - to exclude. Anything else matches the filename.">
-        <button id="tools-toggle-btn" class="btn" onclick="toggleToolsMenu()" title="More tools">⋯</button>
-        <div class="tools-group" id="tools-group">
-        <button class="btn" onclick="openSearchSettings()" title="Configure search sites">⚙ searches</button>
-        <button class="btn" onclick="openDupesModal()" title="Find likely duplicate files by name similarity">⊕ dupes</button>
-        <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
-        <button class="btn" onclick="openHealthModal()" title="Health check — scan all files for issues">✦ health</button>
-        <button class="btn" id="batch-toggle-btn" onclick="toggleBatchMode()" title="Select files for batch encode">☐ select</button>
-        <button class="btn" id="select-all-visible-btn" onclick="selectAllVisible()" title="Select every file currently visible after filtering (shift-click a checkbox to select a range)">☑ select all visible</button>
-        <button class="btn" onclick="encodeAllFiltered()" title="Batch-encode every file currently visible after filtering, in one step">⚙ encode filtered</button>
-        <button class="btn" title="Clear cached metadata and re-scan all files"
-                onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
-            ↺ Rescan
-        </button>
-        <a href="{{ ingress_path }}/encode" class="btn nav-link-desktop" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none;position:relative;overflow:hidden">
-            <span id="encode-jobs-fill" style="position:absolute;left:0;top:0;bottom:0;width:0%;background:color-mix(in srgb, var(--accent) 25%, transparent);transition:width 1s linear;z-index:0"></span>
-            <span style="position:relative;z-index:1;display:inline-flex;align-items:center;gap:5px">
-                <span id="encode-jobs-dot" style="display:none;width:7px;height:7px;border-radius:50%;background:var(--accent);animation:ms-pulse 1.4s ease-in-out infinite"></span>
-                ⚙ Jobs<span id="encode-jobs-count" style="display:none;margin-left:2px;font-size:11px;background:var(--accent);color:var(--bg);border-radius:8px;padding:0 6px"></span>
-            </span>
-        </a>
-        <a href="{{ ingress_path }}/imdb-scan" class="btn nav-link-desktop" title="IMDb background scan" style="margin-left:auto;text-decoration:none">⬡ IMDb</a>
-        <a href="{{ ingress_path }}/databases" class="btn nav-link-desktop" title="Databases &amp; system info" style="text-decoration:none">⬡ DB</a>
-        <button class="btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch between dark and light theme">🌓</button>
+        <div class="toolbar-actions">
+            <button id="mobile-filter-toggle" class="btn" onclick="toggleMobileFilters()" title="Show filters">⚗ Filters</button>
+            <button class="btn" id="batch-toggle-btn" onclick="toggleBatchMode()" title="Select files for batch encode, delete or move">☐ Select</button>
+            <button class="btn" id="select-all-visible-btn" onclick="selectAllVisible()" title="Select every file currently visible after filtering (shift-click a checkbox to select a range)">☑ All visible</button>
+            <button class="btn" onclick="encodeAllFiltered()" title="Batch-encode every file currently visible after filtering, in one step">⚙ Encode filtered</button>
+            <div class="menu-wrap">
+                <button id="tools-toggle-btn" class="btn" onclick="toggleToolsMenu()" title="Library tools" aria-haspopup="true">Tools ▾</button>
+                <div class="menu" id="tools-group" onclick="this.classList.remove('open')">
+                    <button class="menu-item" onclick="openDupesModal()" title="Find likely duplicate files by name similarity"><span class="menu-icon">⊕</span>Find duplicates</button>
+                    <button class="menu-item" onclick="openHealthModal()" title="Scan all files for issues"><span class="menu-icon">✦</span>Health check</button>
+                    <button class="menu-item" onclick="openExportModal()" title="Export file list"><span class="menu-icon">↓</span>Export file list</button>
+                    <button class="menu-item" onclick="openSearchSettings()" title="Configure the sites offered by the per-file search button"><span class="menu-icon">⚲</span>Search sites…</button>
+                    <hr class="menu-sep">
+                    <button class="menu-item danger" title="Clear cached metadata and re-scan all files"
+                            onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
+                        <span class="menu-icon">↺</span>Rescan library
+                    </button>
+                </div>
+            </div>
         </div>
-    </header>
-    {% include "_mobile_tabs.html" %}
+    </div>
 
-    <button id="mobile-filter-toggle" class="btn" onclick="toggleMobileFilters()" title="Show filters">⚗ Filters</button>
-    <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">
+    <div id="global-sort-bar" class="sort-bar">
         <span class="sort-label">sort:</span>
         <button class="sort-btn active" data-sort="name"  onclick="sortAll(this)" title="Sort by filename">name</button>
         <button class="sort-btn"        data-sort="size"  onclick="sortAll(this)" title="Sort by file size">size</button>
@@ -126,11 +106,10 @@
 
     {% include "_modals.html" %}
 
+{% endblock %}
+{% block scripts %}
     <script>
-    const DELETE_TOKEN = "{{ delete_token }}";
-    const BASE_PATH    = "{{ ingress_path }}";  // e.g. "/api/hassio_ingress/TOKEN" or ""
     const MEDIA_ROOT   = {{ media_root | tojson }};
     </script>
-    <script src="{{ ingress_path }}/static/app.js"></script>
-</body>
-</html>
+    <script src="{{ ingress_path }}/static/app.js?v={{ asset_version }}"></script>
+{% endblock %}

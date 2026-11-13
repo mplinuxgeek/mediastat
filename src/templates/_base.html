@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}MediaStat{% endblock %}</title>
+    <script>
+        // Applied before first paint to avoid a flash of the wrong theme.
+        // Explicit user choice (localStorage) wins; otherwise follows the OS.
+        (function () {
+            var saved = localStorage.getItem('mediastat_theme');
+            var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ ingress_path }}/static/app.css?v={{ asset_version }}">
+    {% block head %}{% endblock %}
+</head>
+<body class="page-{{ active_tab }}">
+    <header class="app-header">
+        <a class="logo" href="{{ ingress_path }}/" title="Media library">▶ MediaStat</a>
+        <nav class="app-nav" aria-label="Sections">
+            <a href="{{ ingress_path }}/" class="nav-link{{ ' active' if active_tab == 'library' }}">Library</a>
+            <a href="{{ ingress_path }}/encode" class="nav-link{{ ' active' if active_tab == 'jobs' }}" title="Encode jobs">
+                <span id="encode-jobs-fill" class="nav-fill"></span>
+                <span id="encode-jobs-dot" class="nav-dot" style="display:none"></span>
+                <span class="nav-label">Jobs</span>
+                <span id="encode-jobs-count" class="nav-count" style="display:none"></span>
+            </a>
+            <a href="{{ ingress_path }}/auto" class="nav-link{{ ' active' if active_tab == 'auto' }}" title="Automatic re-encoding of large files">Auto</a>
+            <a href="{{ ingress_path }}/imdb-scan" class="nav-link{{ ' active' if active_tab == 'imdb' }}" title="IMDb matching and release dates">IMDb</a>
+            <a href="{{ ingress_path }}/databases" class="nav-link{{ ' active' if active_tab == 'system' }}" title="Databases and system info">System</a>
+        </nav>
+        <button class="btn btn-icon" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch between dark and light theme">🌓</button>
+    </header>
+
+    {% block body %}{% endblock %}
+
+    <script>
+    const DELETE_TOKEN = "{{ delete_token }}";
+    const BASE_PATH    = "{{ ingress_path }}";  // e.g. "/api/hassio_ingress/TOKEN" or ""
+    </script>
+    <script src="{{ ingress_path }}/static/core.js?v={{ asset_version }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

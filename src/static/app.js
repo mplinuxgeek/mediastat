@@ -1,42 +1,4 @@
 
-    // ── Theme toggle ──────────────────────────────────────────────
-    // Initial theme is already applied pre-paint by an inline <script> in
-    // <head> (avoids a flash of the wrong theme) — this just handles the
-    // button click and persists the explicit choice.
-    function toggleTheme() {
-        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-        if (isLight) {
-            document.documentElement.removeAttribute('data-theme');
-            localStorage.setItem('mediastat_theme', 'dark');
-        } else {
-            document.documentElement.setAttribute('data-theme', 'light');
-            localStorage.setItem('mediastat_theme', 'light');
-        }
-    }
-
-    // ── Ingress shim ─────────────────────────────────────────────
-    // When running behind HA ingress all absolute paths must be prefixed.
-    if (BASE_PATH) {
-        // Patch fetch — skip URLs already prefixed (e.g. HTMX calling fetch after configRequest)
-        const _fetch = window.fetch;
-        window.fetch = (url, opts) => {
-            if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
-            return _fetch(url, opts);
-        };
-        // Patch EventSource
-        const _ES = window.EventSource;
-        window.EventSource = function(url, cfg) {
-            if (typeof url === 'string' && url.startsWith('/') && !url.startsWith(BASE_PATH)) url = BASE_PATH + url;
-            return new _ES(url, cfg);
-        };
-        Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
-        // Patch HTMX requests (sets path before fetch is called, so fetch guard above prevents double-prefix)
-        document.addEventListener('htmx:configRequest', evt => {
-            if (evt.detail.path.startsWith('/') && !evt.detail.path.startsWith(BASE_PATH))
-                evt.detail.path = BASE_PATH + evt.detail.path;
-        });
-    }
-
     const _encodingPaths = new Set();
 
     function _markEncodingRows() {
@@ -309,7 +271,7 @@
                 </td>
             </tr>`;
         }).join('');
-        const pending = _ESTIMATE_QPS.filter(qp => !state.results.some(r => r.qp === qp));
+        const pending = state.status === 'done' ? [] : _ESTIMATE_QPS.filter(qp => !state.results.some(r => r.qp === qp));
         const pendingRows = pending.map(qp => {
             const active = state.current_qp === qp && state.status === 'encoding';
             const pct = active ? Math.max(0, Math.min(99, state.qp_progress || 0)) : 0;
@@ -332,6 +294,9 @@
         const summary = document.getElementById('estimate-summary');
         if (state.status === 'error') {
             summary.innerHTML = `<span style="color:var(--danger,#c0392b)">Estimate failed: ${escHtml(state.error || 'unknown error')}</span>`;
+        } else if (state.status === 'done' && state.suggested_qp == null) {
+            summary.innerHTML = `<span><strong>No QP suggested</strong></span>` +
+                (state.warning ? `<span style="color:var(--muted);font-size:var(--fs-xs)">${escHtml(state.warning)}</span>` : '');
         } else if (state.status === 'done') {
             let html = `<span>Suggested: <strong>QP ${state.suggested_qp}</strong> ★</span>`;
             html += `<button class="btn" style="padding:4px 10px;font-size:var(--fs-sm)"
@@ -494,10 +459,11 @@
         _batchMode = !_batchMode;
         document.body.classList.toggle('batch-mode', _batchMode);
         const btn = document.getElementById('batch-toggle-btn');
-        btn.classList.toggle('batch-active', _batchMode);
-        btn.textContent = _batchMode ? '✓ selecting' : '☐ select';
+        btn.classList.toggle('active', _batchMode);
+        btn.textContent = _batchMode ? '✓ Selecting' : '☐ Select';
         if (!_batchMode) {
             document.querySelectorAll('.batch-cb:checked').forEach(cb => { cb.checked = false; });
+            document.querySelectorAll('.dir-batch-cb:checked').forEach(cb => { cb.checked = false; });
             updateBatchFab();
         }
     }
@@ -533,10 +499,38 @@
         updateBatchFab();
     }
 
+    function dirBatchCbClick(event, cb) {
+        event.stopPropagation();
+        const details = cb.closest('.dir-entry');
+        if (!details) return;
+
+        // Find all file checkboxes inside this directory (recursively)
+        const fileCbs = details.querySelectorAll('.batch-cb');
+        fileCbs.forEach(fileCb => {
+            const entry = fileCb.closest('.file-entry');
+            if (entry && entry.style.display !== 'none') {
+                fileCb.checked = cb.checked;
+            }
+        });
+
+        // Find all sub-directory checkboxes inside this directory and update them
+        const dirCbs = details.querySelectorAll('.dir-batch-cb');
+        dirCbs.forEach(dirCb => {
+            dirCb.checked = cb.checked;
+        });
+
+        updateBatchFab();
+    }
+
     function selectAllVisible() {
         document.querySelectorAll('.file-entry').forEach(entry => {
             if (entry.style.display === 'none') return;
             const cb = entry.querySelector('.batch-cb');
+            if (cb) cb.checked = true;
+        });
+        document.querySelectorAll('.dir-entry').forEach(dir => {
+            if (dir.style.display === 'none') return;
+            const cb = dir.querySelector(':scope > summary .dir-batch-cb');
             if (cb) cb.checked = true;
         });
         updateBatchFab();
@@ -564,7 +558,6 @@
         _renderCustomPresetButtons();
         applyEncodePreset('quality');
         modal.style.display = 'flex';
-        // Override confirm button to do batch
         const btn = modal.querySelector('.btn-primary');
         btn._originalOnclick = btn.onclick;
         btn.onclick = async () => {
@@ -572,7 +565,7 @@
                 qp:      parseInt(document.getElementById('enc-qp').value, 10),
                 preset:  document.getElementById('enc-preset').value,
                 codec:   document.getElementById('enc-codec').value,
-            gpu:     document.getElementById('enc-gpu').value,
+                gpu:     document.getElementById('enc-gpu').value,
                 format:  document.getElementById('enc-format').value,
                 denoise: document.getElementById('enc-denoise').value || null,
                 crop:    document.getElementById('enc-crop').checked,
@@ -581,27 +574,33 @@
             };
             btn.textContent = 'Queuing…';
             btn.disabled = true;
-            const results = await Promise.all(checked.map(cb => {
-                const path = cb.closest('.file-entry')?.dataset.path;
-                if (!path) return Promise.resolve(false);
-                return fetch('/encode?path=' + encodeURIComponent(path), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
-                    body: JSON.stringify(batchConfig),
-                }).then(r => r.ok).catch(() => false);
-            }));
-            const started = results.filter(Boolean).length;
-            checked.forEach((cb, i) => {
-                if (results[i]) {
+            try {
+                const results = await Promise.all(checked.map(cb => {
                     const path = cb.closest('.file-entry')?.dataset.path;
-                    if (path) _encodingPaths.add(path);
-                }
-            });
-            _markEncodingRows();
-            closeEncodeModal();
-            btn.onclick = btn._originalOnclick;
-            toggleBatchMode();
-            showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 6000);
+                    if (!path) return Promise.resolve(false);
+                    return fetch('/encode?path=' + encodeURIComponent(path), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'X-Delete-Token': DELETE_TOKEN },
+                        body: JSON.stringify(batchConfig),
+                    }).then(r => r.ok).catch(() => false);
+                }));
+                const started = results.filter(Boolean).length;
+                checked.forEach((cb, i) => {
+                    if (results[i]) {
+                        const path = cb.closest('.file-entry')?.dataset.path;
+                        if (path) _encodingPaths.add(path);
+                    }
+                });
+                _markEncodingRows();
+                closeEncodeModal();
+                toggleBatchMode();
+                showToast(`${started} encode job${started !== 1 ? 's' : ''} queued · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 6000);
+            } catch (err) {
+                showToast('Error: ' + escHtml(err.message), 'error');
+            } finally {
+                btn.innerHTML = '⚙ Start Encode <span style="font-size:16px;line-height:1">›</span>';
+                btn.disabled = false;
+            }
         };
     }
 
@@ -805,7 +804,8 @@
                 showToast(`${data.queued} job${data.queued !== 1 ? 's' : ''} queued (${data.total} files found) · <a href="${BASE_PATH}/encode">View →</a>`, 'success', 7000);
             } catch (e) {
                 showToast('Error: ' + escHtml(e.message), 'error');
-                confirmBtn.textContent = '⚙ Start Encode ›';
+            } finally {
+                confirmBtn.innerHTML = '⚙ Start Encode <span style="font-size:16px;line-height:1">›</span>';
                 confirmBtn.disabled = false;
             }
         };
@@ -1750,25 +1750,8 @@
     }
 
     // ── Utility ───────────────────────────────────────────────────
-    function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
     function escHtmlAttr(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
     function escJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
-
-    // ── Toast ────────────────────────────────────────────────────
-    function showToast(html, type = 'info', duration = 4000) {
-        let t = document.getElementById('_toast');
-        if (!t) {
-            t = document.createElement('div');
-            t.id = '_toast';
-            t.className = 'toast';
-            document.body.appendChild(t);
-        }
-        t.className = 'toast ' + type;
-        t.innerHTML = html;
-        requestAnimationFrame(() => t.classList.add('show'));
-        clearTimeout(t._timer);
-        t._timer = setTimeout(() => t.classList.remove('show'), duration);
-    }
 
     class TaskQueue {
         constructor(concurrency = 2) {
@@ -1827,7 +1810,7 @@
             const data = JSON.parse(e.data);
             if (data.type === 'start' || data.type === 'progress') {
                 const done = data.done || 0;
-                const tot  = data.total || total;
+                const tot  = data.total ?? total;
                 el.querySelector('.scan-done').textContent = done;
                 el.querySelector('.scan-total').textContent = tot;
                 el.querySelector('.scan-bar-fill').style.width = (tot > 0 ? done / tot * 100 : 0) + '%';
@@ -1848,24 +1831,22 @@
                     }
                 }
             } else if (data.type === 'done') {
+                // The scan is incremental: rows for new/changed files arrived
+                // one by one above, unchanged rows were never touched. All
+                // that's left is dropping rows for files that are gone and
+                // putting the new arrivals in the active sort order.
                 source.close();
                 const block = el.closest('.dir-block');
                 el.remove();
                 if (table) {
-                    if (data.html) {
-                        const tmp = document.createElement('div');
-                        tmp.innerHTML = data.html;
-                        const newTable = tmp.querySelector('.files-table');
-                        if (newTable) table.replaceWith(newTable);
-                        else table.remove();
-                    } else {
-                        table.remove();
+                    for (const gone of (data.removed || [])) {
+                        const row = table.querySelector(`.file-entry[data-path="${CSS.escape(gone)}"]`);
+                        if (row) row.remove();
                     }
-                } else if (data.html) {
-                    const tmp = document.createElement('div');
-                    tmp.innerHTML = data.html;
-                    block && block.appendChild(tmp.firstElementChild);
+                    if (!table.querySelector('.file-entry')) table.remove();
                 }
+                const activeSort = document.querySelector('#global-sort-bar .sort-btn.active');
+                if (block && activeSort) _applySort(activeSort.dataset.sort, block);
                 applyFilters();
                 rebuildDynamicFilters();
                 loadImdbBadges(path);
@@ -2006,10 +1987,24 @@
     // sort. Re-apply whatever sort is currently active every time htmx swaps
     // in new listing content, so both the initial load and later-expanded
     // subdirectories end up in the URL-restored (or last clicked) order.
-    document.body.addEventListener('htmx:afterSwap', () => {
+    document.body.addEventListener('htmx:afterSwap', (evt) => {
         const activeBtn = document.querySelector('#global-sort-bar .sort-btn.active');
-        if (activeBtn) _applySort(activeBtn.dataset.sort);
+        if (activeBtn && evt.detail && evt.detail.target) {
+            _applySort(activeBtn.dataset.sort, evt.detail.target);
+        } else if (activeBtn) {
+            _applySort(activeBtn.dataset.sort);
+        }
         _applyWatchBadges();
+
+        // Update checkbox states of newly loaded children under checked folders
+        document.querySelectorAll('.dir-entry').forEach(dir => {
+            const dirCb = dir.querySelector(':scope > summary .dir-batch-cb');
+            if (dirCb && dirCb.checked) {
+                dir.querySelectorAll('.batch-cb').forEach(cb => cb.checked = true);
+                dir.querySelectorAll('.dir-batch-cb').forEach(cb => cb.checked = true);
+            }
+        });
+        updateBatchFab();
     });
 
     // Kick off scans/checks for placeholders on initial page load
@@ -2017,34 +2012,6 @@
     document.querySelectorAll('.files-checking').forEach(startDirCheck);
     loadDirSizes(document);
     loadFolderHeader();
-
-    // ── Live encode job-count badge + progress fill on the Jobs link ───
-    // Only present on pages with the Jobs nav button (index.html).
-    if (document.getElementById('encode-jobs-count')) {
-        const _refreshJobsBadge = () => {
-            fetch('/encode/active-count')
-                .then(r => r.ok ? r.json() : { count: 0, avg_progress: null })
-                .then(d => {
-                    const badge = document.getElementById('encode-jobs-count');
-                    const dot   = document.getElementById('encode-jobs-dot');
-                    const fill  = document.getElementById('encode-jobs-fill');
-                    if (!badge || !dot || !fill) return;
-                    if (d.count > 0) {
-                        badge.textContent = d.count;
-                        badge.style.display = '';
-                        dot.style.display = 'inline-block';
-                        fill.style.width = (d.avg_progress != null ? d.avg_progress : 0) + '%';
-                    } else {
-                        badge.style.display = 'none';
-                        dot.style.display = 'none';
-                        fill.style.width = '0%';
-                    }
-                })
-                .catch(() => {});
-        };
-        _refreshJobsBadge();
-        setInterval(_refreshJobsBadge, 5000);
-    }
 
     // ── Folder header ─────────────────────────────────────────────
     async function loadFolderHeader() {
@@ -2092,8 +2059,17 @@
             }
         }
         if (needsRebuild) rebuildDynamicFilters();
-        if (needsFilter)  applyFilters();
+        if (needsFilter)  _scheduleApplyFilters();
     }).observe(document.body, { childList: true, subtree: true });
+
+    // applyFilters() walks every file row, and during a scan rows arrive one
+    // mutation at a time — coalesce to one pass per frame instead of one full
+    // pass per inserted row.
+    let _filterFrame = 0;
+    function _scheduleApplyFilters() {
+        if (_filterFrame) return;
+        _filterFrame = requestAnimationFrame(() => { _filterFrame = 0; applyFilters(); });
+    }
 
     // ── Search + Filters ─────────────────────────────────────────
     function resTag(width, height) {
@@ -2342,7 +2318,7 @@
         });
     }
 
-    function _applySort(key) {
+    function _applySort(key, rootElement = document) {
         const reorder = (container, selector) => {
             const els = [...container.querySelectorAll(selector)];
             els.sort((a, b) => {
@@ -2362,17 +2338,24 @@
                 if (key === 'date') cmp = parseFloat(a.dataset.mtime) - parseFloat(b.dataset.mtime);
                 return _sortDir === 'asc' ? cmp : -cmp;
             });
-            const frag = document.createDocumentFragment();
-            els.forEach(e => frag.appendChild(e));
-            container.appendChild(frag);
+            // Already in order (the usual case: the server sends rows sorted
+            // by name) — skip re-appending every row, which would force a
+            // full relayout of the listing for nothing.
+            const current = container.children;
+            if (els.length === current.length && els.every((e, i) => e === current[i])) return;
+            els.forEach(e => container.appendChild(e));
         };
-        document.querySelectorAll('.dir-block').forEach(block => {
+        const blocks = (rootElement.classList && rootElement.classList.contains('dir-block'))
+            ? [rootElement]
+            : [...rootElement.querySelectorAll('.dir-block')];
+        blocks.forEach(block => {
             const dc = block.querySelector(':scope > .dirs-container');
             if (dc) reorder(dc, ':scope > .dir-entry');
             const ft = block.querySelector(':scope > .files-table');
             if (ft) reorder(ft, ':scope > .file-entry');
         });
     }
+
 
     function sortAll(btn) {
         const key = btn.dataset.sort;
@@ -3005,7 +2988,7 @@
         if (res.ok) {
             row.remove();
         } else {
-            alert('Delete failed (' + res.status + ')');
+            showToast('Delete failed (' + res.status + ')', 'error');
         }
     }
 
@@ -3463,6 +3446,6 @@
             const msg = res.status === 409 ? 'A file with that name already exists.'
                       : res.status === 400 ? 'Invalid filename.'
                       : 'Rename failed (' + res.status + ')';
-            alert(msg);
+            showToast(msg, 'error');
         }
     }

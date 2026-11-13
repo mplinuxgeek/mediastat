@@ -1,0 +1,246 @@
+{% extends "_base.html" %}
+{% block title %}Auto Encode — MediaStat{% endblock %}
+{% block body %}
+<main class="page">
+    <div class="page-head">
+        <h1 class="page-title">Auto encode</h1>
+        <span class="page-sub">Re-encodes large files and replaces the originals</span>
+        <div class="page-head-aside" id="chips"></div>
+    </div>
+
+    <div class="panel now-line"><span class="dot" id="dot"></span><span id="now">loading…</span></div>
+
+    <div class="panel settings" id="settings">
+        <div class="settings-head">
+            <label class="switch" title="Turn auto encode on or off. Off: no scanning, estimating or encoding">
+                <input type="checkbox" id="sw-enabled" onchange="toggleEnabled(this)">
+                <span class="switch-track"></span>
+            </label>
+            <div class="settings-title">Auto encode <b id="enabled-label"></b></div>
+            <div class="settings-actions">
+                <span id="scan-note" class="panel-note"></span>
+                <button class="btn btn-sm" id="btn-scan" onclick="scanNow()" title="Look for new or changed files now">🔍 Scan now</button>
+                <button class="btn btn-sm" id="btn-pause" onclick="togglePause()">Pause</button>
+            </div>
+        </div>
+        <div class="settings-body">
+            <div class="form-row">
+                <span class="form-label">Mode</span>
+                <div class="seg" id="mode-seg">
+                    <button type="button" id="mode-dry" onclick="setMode(true)" title="Decide and log only; nothing is encoded or replaced">Dry run</button>
+                    <button type="button" id="mode-live" onclick="setMode(false)" title="Re-encode files and replace the originals">Live</button>
+                </div>
+            </div>
+            <div class="form-row" title="Same window as the encode schedule on the Jobs page">
+                <span class="form-label">Run between</span>
+                <select id="win-start" class="input" onchange="WIN_DIRTY=true"></select> and <select id="win-end" class="input" onchange="WIN_DIRTY=true"></select>
+                <span id="win-note" class="panel-note"></span>
+            </div>
+            <div class="form-row" title="Only files at least this big are considered for auto encode">
+                <span class="form-label">Only files over</span>
+                <input id="thr-min-gb" class="input input-num" type="number" min="0.1" max="1000" step="0.5" oninput="THR_DIRTY=true"> GB
+                <span class="panel-note">Raising it drops waiting files under it; lowering it rescans the library.</span>
+            </div>
+            <div class="form-row" title="Highest QP the estimator may pick. Lower = stricter quality; files that would need more are skipped">
+                <span class="form-label">Max QP</span>
+                <input id="thr-max-qp" class="input input-num" type="number" min="10" max="40" step="1" oninput="THR_DIRTY=true">
+                <span class="panel-note">Files that would need a higher QP are skipped.</span>
+            </div>
+            <div class="form-row">
+                <span class="form-label"></span>
+                <button class="btn btn-accent" onclick="saveSettings()">Save settings</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="tiles" id="tiles"></div>
+
+    <div class="pills" id="tabs"></div>
+    <div id="rows"></div>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>
+let DATA = null, FILTER = 'all', QUERY = '', THR_DIRTY = false, WIN_DIRTY = false;
+const OPEN_DETAILS = new Set();  // failed rows whose ffmpeg output is expanded — survives the 8 s re-render
+const GB = n => n ? (n / 1e9).toFixed(1) + ' GB' : '—';
+const baseName = p => String(p || '').split('/').pop();
+const ENC_NAMES = { hevc_qsv: 'Intel QSV', hevc_nvenc: 'NVENC', hevc_vaapi: 'VA-API', libx265: 'Software', copy: 'Copy Mode' };
+// Same figures as the Jobs page: FPS cur/avg, ETA, input, size so far / estimated, encoder
+function jobStats(j, r) {
+    const estSize = (j.output_size && j.progress > 0) ? j.output_size / j.progress * 100 : null;
+    const elapsed = j.started_at ? Date.now() / 1000 - j.started_at : 0;
+    const eta = (elapsed > 2 && j.progress > 0.5) ? fmtDuration(elapsed / j.progress * (100 - j.progress), '--') : (j.eta && j.eta !== '--' ? j.eta : '--');
+    return `<span>${escHtml(ENC_NAMES[j.encoder] || j.encoder || 'detecting…')}${r.qp ? ' · QP ' + r.qp : ''}</span>` +
+        `<span>FPS <b>${(j.fps || 0).toFixed(1)}</b> cur / <b>${(j.avg_fps || 0).toFixed(1)}</b> avg</span>` +
+        `<span>ETA <b>${escHtml(eta)}</b></span><span>Elapsed <b>${fmtDuration(elapsed, '--')}</b></span>` +
+        (j.input_size ? `<span>Input <b>${GB(j.input_size)}</b></span>` : '') +
+        (j.output_size ? `<span>Size <b>${GB(j.output_size)}</b>${estSize ? ` / <b>${GB(estSize)}</b> est` : ''}</span>` : '');
+}
+const GO_STATES = ['pending', 'would_encode', 'skipped', 'error', 'failed', 'verify_failed'];
+const FILTERS = {
+    all: () => true,
+    active: r => ['queued', 'would_encode'].includes(r.state),
+    pending: r => r.state === 'pending',
+    done: r => r.state === 'replaced',
+    skipped: r => r.state === 'skipped',
+    excluded: r => r.state === 'excluded',
+    problems: r => ['failed', 'verify_failed', 'error'].includes(r.state),
+};
+
+async function toggleEnabled(box) {
+    const on = box.checked;
+    if (on && !DATA.config.dry_run && !confirm('Enable auto encode in LIVE mode?\n\nFiles will be re-encoded and replaced. Originals are kept in .mediastat-trash for ' + DATA.config.trash_days + ' days.')) { box.checked = false; return; }
+    const r = await apiPost('/auto/settings', { enabled: on });
+    if (r) showToast(on ? 'Auto encode enabled — scanning' : 'Auto encode disabled', 'success');
+    load();
+}
+async function togglePause() { await apiPost('/auto/settings', { paused: !DATA.config.paused }); load(); }
+async function scanNow() {
+    if (await apiPost('/auto/scan')) showToast('Scan requested — new files appear in a moment', 'success');
+    setTimeout(load, 3000);
+}
+async function setMode(dryRun) {
+    if (dryRun === DATA.config.dry_run) return;
+    if (!dryRun && !confirm('Go LIVE?\n\nFiles will be re-encoded and replaced. Originals are kept in .mediastat-trash for ' + DATA.config.trash_days + ' days.')) return;
+    await apiPost('/auto/settings', { dry_run: dryRun }); load();
+}
+// One save for the window and the thresholds; only the parts that were edited are sent
+async function saveSettings() {
+    const body = {};
+    if (WIN_DIRTY) {
+        body.start = +document.getElementById('win-start').value;
+        body.end = +document.getElementById('win-end').value;
+    }
+    if (THR_DIRTY) {
+        const minGb = parseFloat(document.getElementById('thr-min-gb').value);
+        const maxQp = parseInt(document.getElementById('thr-max-qp').value, 10);
+        if (!(minGb > 0) || !(maxQp > 0)) { showToast('Enter a size in GB and a QP', 'error'); return; }
+        if (minGb * 1e9 > DATA.config.min_bytes && !confirm('Raise the minimum size to ' + minGb + ' GB?\n\nFiles still waiting (pending / would encode) that are smaller than this are removed from the list.')) return;
+        body.min_gb = minGb; body.max_qp = maxQp;
+    }
+    if (!Object.keys(body).length) { showToast('Nothing to save', 'info'); return; }
+    const r = await apiPost('/auto/settings', body);
+    if (r) {
+        const lowered = THR_DIRTY && r.min_gb * 1e9 < DATA.config.min_bytes;
+        WIN_DIRTY = THR_DIRTY = false;
+        showToast('Settings saved' + (r.dropped ? ' · ' + r.dropped + ' waiting file(s) dropped' : '') + (lowered ? ' · rescanning' : ''), 'success', 5000);
+    }
+    setTimeout(load, 1000);
+}
+async function exclude(path, excluded) {
+    if (excluded && !confirm('Never auto-encode this file?\n\n' + baseName(path))) return;
+    const r = await apiPost('/auto/exclude', { path, excluded });
+    if (r) showToast(excluded ? 'Marked do not encode' : 'Back in the pool', 'success');
+    load();
+}
+async function restore(path) {
+    if (!confirm('Restore the original?\n\n' + baseName(path) + '\n\nThe encoded file is deleted, the original comes back from .mediastat-trash, and the file is marked do not encode.')) return;
+    const r = await apiPost('/auto/restore', { path });
+    if (r) showToast('Original restored', 'success');
+    load();
+}
+async function go(path) {
+    if (!confirm('Encode this file now?\n\n' + baseName(path) + '\n\nIt runs immediately (ignoring the window and pause), and replaces the original — which is kept in .mediastat-trash for ' + DATA.config.trash_days + ' days.')) return;
+    const r = await apiPost('/auto/run', { path });
+    if (r) showToast('Started: ' + escHtml(r.status), 'success');
+    setTimeout(load, 1500);
+}
+
+function render() {
+    const d = DATA, c = d.counts || {}, s = d.state, cfg = d.config, sc = d.schedule;
+    const hh = h => String(h).padStart(2, '0') + ':00';
+    // header chips
+    const mode = !cfg.enabled ? ['OFF', ''] : cfg.dry_run ? ['DRY RUN', 'warn'] : ['LIVE', 'live'];
+    document.getElementById('chips').innerHTML =
+        `<span class="chip ${mode[1]}"${cfg.enabled ? '' : ' title="Auto encode is disabled"'}>${mode[0]}</span>` +
+        (cfg.paused ? '<span class="chip warn">PAUSED</span>' : '') +
+        `<span class="chip ${sc.enabled ? 'ok' : ''}">${sc.enabled ? hh(sc.start) + ' – ' + hh(sc.end) : 'any time'}</span>`;
+    // now line
+    const running = (d.recent || []).find(r => r.job && r.job.status === 'running');
+    const busy = !!d.estimate || ['estimating', 'finalizing'].includes(s.status) || !!running;
+    document.getElementById('dot').className = 'dot' + (busy ? ' busy' : '');
+    document.getElementById('now').textContent = running
+        ? `Encoding ${baseName(running.path)} — ${Math.round(running.job.progress)}%${running.job.eta && running.job.eta !== '--' ? ' · ETA ' + running.job.eta : ''}`
+        : d.estimate ? `Estimating ${d.estimate.file} — testing QP ${d.estimate.qp ?? '…'} (${d.estimate.done} done${d.estimate.progress ? ', ' + Math.round(d.estimate.progress) + '%' : ''}); each QP takes a minute or two`
+        : s.status === 'estimating' ? `Estimating ${baseName(s.current)}…`
+        : !cfg.enabled ? 'Auto encode is disabled — nothing is scanned or encoded' + (cfg.dirs.length ? '' : ' (AUTO_DIRS is not set)')
+        : s.status === 'waiting for window' ? 'Waiting for the run window'
+        : s.status === 'paused' ? 'Paused'
+        : s.status === 'error' ? 'Worker error' + (s.note ? ': ' + s.note : '')
+        : 'Idle';
+    // controls
+    document.getElementById('settings').classList.toggle('off', !cfg.enabled);
+    document.getElementById('sw-enabled').checked = !!cfg.enabled;
+    const enabledLabel = document.getElementById('enabled-label');
+    enabledLabel.textContent = cfg.enabled ? 'on' : 'off';
+    enabledLabel.className = cfg.enabled ? 'on' : 'off';
+    const pauseBtn = document.getElementById('btn-pause');
+    pauseBtn.textContent = cfg.paused ? '▶ Resume' : '⏸ Pause';
+    pauseBtn.className = 'btn btn-sm' + (cfg.paused ? ' btn-accent' : '');
+    pauseBtn.disabled = document.getElementById('btn-scan').disabled = !cfg.enabled;
+    document.getElementById('mode-dry').className = cfg.dry_run ? 'on' : '';
+    document.getElementById('mode-live').className = cfg.dry_run ? '' : 'on live';
+    const ws = document.getElementById('win-start'), we = document.getElementById('win-end');
+    if (!ws.options.length) for (const sel of [ws, we]) for (let h = 0; h < 24; h++) sel.add(new Option(hh(h), h));
+    if (!WIN_DIRTY) { ws.value = sc.start; we.value = sc.end; }
+    document.getElementById('win-note').textContent = sc.enabled ? '' : '(window off: runs any time — saving a window turns it on)';
+    // thresholds — leave the inputs alone while they hold unsaved edits
+    if (!THR_DIRTY) {
+        document.getElementById('thr-min-gb').value = +(cfg.min_bytes / 1e9).toFixed(1);
+        document.getElementById('thr-max-qp').value = cfg.max_qp;
+    }
+    document.getElementById('scan-note').textContent = 'Last scan ' + (s.last_scan ? new Date(s.last_scan * 1000).toLocaleTimeString() : 'never') + ' · every ' + cfg.scan_hours + ' h';
+    // tiles
+    const saved = (d.recent || []).reduce((a, r) => a + (r.saved_bytes || 0), 0);
+    const tile = (n, l, cls) => `<div class="tile ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+    const gbTile = n => GB(n).replace(' GB', ' <small>GB</small>');
+    const lowSpace = s.free_bytes && s.free_bytes < cfg.min_free_bytes;
+    document.getElementById('tiles').innerHTML =
+        tile(c.pending || 0, 'Pending', 'accent') + tile(c.would_encode || 0, 'Would encode', 'yellow') + tile(c.queued || 0, 'Encoding', 'accent') +
+        tile(c.replaced || 0, 'Replaced', 'green') + tile(gbTile(saved), 'Space saved', 'green') +
+        tile(c.skipped || 0, 'Skipped', '') +
+        tile(gbTile(s.free_bytes), 'Library free' + (lowSpace ? ' (low)' : ''), lowSpace ? 'red' : '') +
+        tile(gbTile(s.trash_bytes), 'In trash', '') + tile((c.failed || 0) + (c.verify_failed || 0) + (c.error || 0), 'Problems', 'red');
+    // tabs — skip rebuilding while the search box has focus so typing isn't interrupted
+    const rows = d.recent || [];
+    if (document.activeElement && document.activeElement.id === 'auto-search') { renderRows(); return; }
+    document.getElementById('tabs').innerHTML = Object.keys(FILTERS).map(k =>
+        `<button class="pill ${FILTER === k ? 'on' : ''}" onclick="FILTER='${k}';render()">${k[0].toUpperCase() + k.slice(1)}<span class="c">${rows.filter(FILTERS[k]).length}</span></button>`).join('') +
+        `<input id="auto-search" class="input" type="search" placeholder="Search…" value="${escHtml(QUERY)}" oninput="QUERY=this.value;renderRows()">`;
+    renderRows();
+}
+
+function renderRows() {
+    const q = QUERY.toLowerCase();
+    const rows = (DATA.recent || []).filter(FILTERS[FILTER]).filter(r => r.path.toLowerCase().includes(q));
+    const el = document.getElementById('rows');
+    if (!rows.length) {
+        el.innerHTML = `<div class="empty-state">${(DATA.recent || []).length ? 'Nothing matches this filter.' : 'No files tracked yet — they appear here after the first library scan.'}</div>`;
+        return;
+    }
+    el.innerHTML = rows.map(r => {
+        const j = r.job, running = j && j.status === 'running';
+        const label = r.state === 'queued' ? (running ? 'encoding' : 'queued') : r.state.replace('_', ' ');
+        const badgeCls = r.state === 'queued' ? (running ? 'running' : 'queued') : r.state;
+        const canGo = GO_STATES.includes(r.state);
+        const canExclude = !['queued', 'estimating', 'excluded', 'replaced'].includes(r.state);
+        // Paths go through data-path (HTML-escaped) rather than being inlined into the onclick JS
+        const p = `data-path="${escHtml(r.path)}"`;
+        return `<div class="card auto-row ${running ? 'running' : ''}">
+            <div><span class="badge badge-${escHtml(badgeCls)}">${escHtml(label)}</span><span class="name" title="${escHtml(r.path)}">${escHtml(baseName(r.path))}</span></div>
+            <div class="actions">${canGo ? `<button class="btn btn-sm btn-primary" ${p} onclick="go(this.dataset.path)" title="Estimate and encode this file now">▶ Go</button>` : ''}${canExclude ? `<button class="btn btn-sm" ${p} onclick="exclude(this.dataset.path, true)" title="Never auto-encode this file">⛔ Exclude</button>` : ''}${r.state === 'excluded' ? `<button class="btn btn-sm" ${p} onclick="exclude(this.dataset.path, false)" title="Allow auto-encoding again">Include</button>` : ''}${r.state === 'replaced' ? `<button class="btn btn-sm" ${p} onclick="restore(this.dataset.path)" title="Put the original back and never auto-encode it">↩ Restore</button>` : ''}</div>
+            <div class="meta wide"><span>${GB(r.size)}</span>${r.qp ? `<span>QP ${r.qp}</span>` : ''}${r.est_bytes ? `<span>→ ~${GB(r.est_bytes)}</span>` : ''}${r.saved_bytes ? `<span style="color:var(--green)">saved ${GB(r.saved_bytes)}</span>` : ''}${running ? `<span>${Math.round(j.progress)}%</span>` : ''}${r.state === 'replaced' && r.saved_bytes ? `<span>${GB(r.size + r.saved_bytes)} → ${GB(r.size)} (−${Math.round(r.saved_bytes / (r.size + r.saved_bytes) * 100)}%)</span>` : ''}</div>
+            ${running ? `<div class="progress wide"><div class="progress-fill" style="width:${Math.min(100, j.progress)}%"></div></div><div class="meta wide">${jobStats(j, r)}</div>` : ''}
+            ${r.reason ? `<div class="reason wide">${escHtml(r.reason)}</div>` : ''}
+            ${r.error_log ? `<details class="job-cmd-details wide" data-detail="${escHtml(r.path)}"${OPEN_DETAILS.has(r.path) ? ' open' : ''} ontoggle="this.open ? OPEN_DETAILS.add(this.dataset.detail) : OPEN_DETAILS.delete(this.dataset.detail)"><summary>ffmpeg output</summary>${r.ffmpeg_cmd ? `<div class="job-cmd-box"><code>${escHtml(r.ffmpeg_cmd)}</code></div>` : ''}<pre class="error-log">${escHtml(r.error_log)}</pre></details>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function load() {
+    try { DATA = await (await fetch('/auto/status')).json(); render(); } catch (e) { /* retry on next tick */ }
+}
+load(); setInterval(load, 8000);
+</script>
+{% endblock %}
