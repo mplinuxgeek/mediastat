@@ -7,11 +7,18 @@ os.environ.setdefault("MEDIA_ROOT", tempfile.gettempdir())
 os.environ.setdefault("CONFIG_PATH", os.path.join(tempfile.gettempdir(), "mediastat-test-config.yaml"))
 os.environ["DB_PATH"] = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
 
-from fastapi.testclient import TestClient  # noqa: E402
-
 import main  # noqa: E402
 
 GB = 10 ** 9
+
+
+class _FakeRequest:
+    def __init__(self, body=None, token=True):
+        self.headers = {"X-Delete-Token": main.DELETE_TOKEN} if token else {}
+        self._body = body if body is not None else {}
+
+    async def json(self):
+        return self._body
 
 
 class AutoEnabledTests(unittest.IsolatedAsyncioTestCase):
@@ -27,8 +34,6 @@ class AutoEnabledTests(unittest.IsolatedAsyncioTestCase):
         await main.init_db()
         await main._auto_db_init()
         main._auto_scan_now.clear()
-        self.client = TestClient(main.app)  # no lifespan: the worker must not run under the test
-        self.headers = {"X-Delete-Token": main.DELETE_TOKEN}
 
     async def asyncTearDown(self):
         main._auto_scan_now.clear()
@@ -54,32 +59,39 @@ class AutoEnabledTests(unittest.IsolatedAsyncioTestCase):
         await main._auto_load_settings()  # nothing saved yet
         self.assertTrue(main._AUTO["enabled"])
 
-    def test_endpoint_toggles_persists_and_requests_a_scan_on_enable(self):
-        r = self.client.post("/auto/settings", json={"enabled": True}, headers=self.headers)
-        self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()["enabled"])
+    async def test_endpoint_toggles_persists_and_requests_a_scan_on_enable(self):
+        r = await main.auto_settings(_FakeRequest({"enabled": True}))
+        self.assertTrue(r["enabled"])
         self.assertTrue(main._AUTO["enabled"])
         self.assertTrue(main._auto_scan_now.is_set())
 
         main._auto_scan_now.clear()
-        r = self.client.post("/auto/settings", json={"enabled": False}, headers=self.headers)
-        self.assertFalse(r.json()["enabled"])
+        r = await main.auto_settings(_FakeRequest({"enabled": False}))
+        self.assertFalse(r["enabled"])
         self.assertFalse(main._auto_scan_now.is_set())
-        self.assertFalse(self.client.get("/auto/status").json()["config"]["enabled"])
+        self.assertFalse((await main.auto_status())["config"]["enabled"])
 
-    def test_other_settings_leave_the_switch_alone(self):
-        main._AUTO["enabled"] = True
-        self.client.post("/auto/settings", json={"paused": True}, headers=self.headers)
-        self.assertTrue(main._AUTO["enabled"])
-
-    def test_enabling_without_dirs_is_refused(self):
-        main._AUTO["dirs"] = []
-        r = self.client.post("/auto/settings", json={"enabled": True}, headers=self.headers)
-        self.assertEqual(r.status_code, 400)
+        main._AUTO["enabled"] = True  # a fresh process with AUTO_ENCODE=1 still comes up off
+        await main._auto_load_settings()
         self.assertFalse(main._AUTO["enabled"])
 
-    def test_token_is_required(self):
-        self.assertEqual(self.client.post("/auto/settings", json={"enabled": True}).status_code, 403)
+    async def test_other_settings_leave_the_switch_alone(self):
+        main._AUTO["enabled"] = True
+        await main.auto_settings(_FakeRequest({"paused": True}))
+        self.assertTrue(main._AUTO["enabled"])
+
+    async def test_enabling_without_dirs_is_refused(self):
+        main._AUTO["dirs"] = []
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.auto_settings(_FakeRequest({"enabled": True}))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertFalse(main._AUTO["enabled"])
+
+    async def test_token_is_required(self):
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.auto_settings(_FakeRequest({"enabled": True}, token=False))
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertFalse(main._AUTO["enabled"])
 
     async def test_disabled_step_starts_no_new_work(self):
         await main._auto_set("/movies/a.mkv", 20 * GB, 1, "pending")
