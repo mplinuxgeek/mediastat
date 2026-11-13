@@ -97,8 +97,10 @@ class DirFlatteningTests(unittest.IsolatedAsyncioTestCase):
         # Insert metadata stub in DB
         async with main.aiosqlite.connect(main.DB_PATH) as db:
             await db.execute(
-                "INSERT INTO file_meta (path, size, video_codec) VALUES (?, ?, ?)",
-                (str(f_movie), 12345, "h264")
+                # mtime must match the file, or the cache misses and ffprobe
+                # (not installed on the CI runner) is run
+                "INSERT INTO file_meta (path, size, mtime, video_codec) VALUES (?, ?, ?, ?)",
+                (str(f_movie), 12345, f_movie.stat().st_mtime, "h264")
             )
             await db.commit()
 
@@ -117,8 +119,8 @@ class DirFlatteningTests(unittest.IsolatedAsyncioTestCase):
             f_movie_match = movie_dir / "Awesome Movie (2020).mp4"
             f_movie_match.write_bytes(b"0")
             await db.execute(
-                "INSERT INTO file_meta (path, size, video_codec) VALUES (?, ?, ?)",
-                (str(f_movie_match), 12345, "h264")
+                "INSERT INTO file_meta (path, size, mtime, video_codec) VALUES (?, ?, ?, ?)",
+                (str(f_movie_match), 12345, f_movie_match.stat().st_mtime, "h264")
             )
             await db.commit()
 
